@@ -2,7 +2,7 @@
 
 ## tl;dr
 
-EXLR8 is a quantization format for serving models at low bitrates with less compromised on the
+EXLR8 is a quantization format for serving models at low bitrates with fewer compromises on the
 compute side.
 
 On unified memory hardware, **decode speed is bound by how many bytes of expert weights you read
@@ -22,8 +22,8 @@ What EXLR8 adds is:
 3. **Rotation is shared, not per-expert**: one sign vector per layer on the hidden side, so the
    kernel rotates the token's activation once and reuses it across all 8 active experts.
 4. **The layout is TP-native**: a single sharding rule serves TP=3–7 with zero re-layout, and a
-   node can fetch only its own slices over HTTP range requests (~75 GB/node at TP=4 instead of the
-   full 181 GiB checkpoint).
+   node can fetch only its own slices over HTTP range requests (~75 GB per node at TP=4 under the
+   `home` manifest, instead of the whole checkpoint).
 
 Decode quality comes from calibrated rounding (GPTQ/LDLQ against real activation statistics), which
 is 2.3–33× better than round-to-nearest at the same bit width.
@@ -32,14 +32,15 @@ is 2.3–33× better than round-to-nearest at the same bit width.
 
 ## The math, step by step
 
-The first EXLR8 quant is GLM-5.3 from z.ai.
+The first EXLR8 quant is GLM-5.3 from z.ai:
+[kindlingai/glm-5.3-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4).
 
 ### 0. The model it has to fit
 
 GLM-5.3's MoE layers (3–77) have **256 routed experts, 8 active per token**; hidden dim 6144,
 intermediate dim 2048. One expert is 37,748,736 weights (three 6144×2048/2048×6144 matrices:
-gate, up, down). A layer's experts alone are 10.87 GB at K4 — the design exists to make per-token
-reads out of that as small as the budget allows.
+gate, up, down). A layer's 256 experts take 4.83 GB at K4 (10.87 GB for all three widths) — the
+design exists to make per-token reads out of that as small as the budget allows.
 
 ### 1. Rotation — the transform the quantizer sees
 
@@ -141,7 +142,7 @@ At **load time**, a manifest picks the width per unit:
 
 Choosing widths is a knapsack under a per-rank memory budget, driven by per-half/per-expert error
 tables recorded at encode time. The shipped `home` manifest (64 experts at K4, 192 at K3 ≈ 3.25
-bits/weight) reads 3.93 GB per layer ≈ **75 GB per node at TP=4**.
+bits/weight) holds 3.93 GB per layer ≈ **75 GB per node at TP=4**.
 
 ### 6. Sharding — the half rule
 
@@ -152,8 +153,8 @@ rank = (16e + h + L) mod N
 ```
 
 One rule serves every N from 3 to 7; nothing is rewritten per topology. At TP=4 each rank owns
-exactly 4 of every expert's 16 halves (h0, h0+4, h0+8, h0+12 with h0 = (−L) mod 4). Kernels get a
-pointer table `ptr[e][h]` (null = not owned) instead of contiguous ranges, and per-half widths are
+exactly 4 of every expert's 16 halves (rank r owns h0, h0+4, h0+8, h0+12 with h0 = (r − L) mod 4).
+Kernels get a pointer table `ptr[e][h]` (null = not owned) instead of contiguous ranges, and per-half widths are
 fine because the table is re-read every launch — which also later allows paging weights in from
 mapped files.
 
@@ -166,7 +167,7 @@ mapped files.
 | Code | trellis, K bits/weight, mcg codebook | same codec + E4M3 rounding inside the search |
 | Codebook values | fp16 | exactly E4M3 (prefill on FP8 MMA) |
 | Granularity | one width per tensor | three widths stored; per-half manifest at load |
-| Rounding | GPTQ/Hessian optional, per matrix | calibrated LDLQ with pooled/damped Hessians, shared across widths |
+| Rounding | LDLQ against calibration Hessians, per tensor | calibrated LDLQ with pooled/damped Hessians, shared across widths |
 | Rotation | per-tensor side vectors | shared per-layer hidden-side rotation → one activation rotate per token |
 | Topology | format knows nothing about TP | one sharding rule for TP=3–7; range-fetchable slices |
 
