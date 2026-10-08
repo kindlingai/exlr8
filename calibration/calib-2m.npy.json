@@ -1,0 +1,227 @@
+{
+ "sources": {
+  "cc.jsonl": {
+   "weight": 35.0,
+   "share": 0.3684210526315789,
+   "calibration_rows": 360,
+   "calibration_tokens": 737280,
+   "calibration_documents": 67,
+   "heldout_rows": 23,
+   "heldout_documents": 3,
+   "description": "private Claude Code session transcripts, not published"
+  },
+  "code.jsonl": {
+   "weight": 15.0,
+   "share": 0.15789473684210525,
+   "calibration_rows": 154,
+   "calibration_tokens": 315392,
+   "calibration_documents": 1326,
+   "heldout_rows": 10,
+   "heldout_documents": 83,
+   "sha256": "0c41dea745920555bf4a5160246d0337bcf97aacb1d3a0017932bd1c922b0da3",
+   "meta": {
+    "dataset": "bigcode/commitpackft",
+    "revision": "fc56fe33c030c6daa414c2b112c932b8eed085e6",
+    "licence": "MIT (dataset); permissively licensed source repositories only",
+    "taken": "languages rust, python, typescript, c, c++, cuda, go, shell, yaml, toml, dockerfile, makefile, cmake, equal shares; half new_contents as whole files (path line first), half commits rendered as message + unified diff",
+    "documents": 1709
+   }
+  },
+  "reasoning.jsonl": {
+   "weight": 10.0,
+   "share": 0.10526315789473684,
+   "calibration_rows": 103,
+   "calibration_tokens": 210944,
+   "calibration_documents": 73,
+   "heldout_rows": 7,
+   "heldout_documents": 5,
+   "sha256": "453237176e0935e07e3dd29cd6558c247b160fb6dbbbdfdcfe56204c3a6b5b8c",
+   "meta": {
+    "dataset": "open-r1/OpenR1-Math-220k + open-thoughts/OpenThoughts-114k",
+    "revision": "e4e141ec9dea9f8326f4d347be56105859b2bd68 + bd093c3994fd54d2390985b66988ddf282a55eb6",
+    "licence": "Apache-2.0 (both)",
+    "taken": "half each by characters; OpenR1 default config, first math-verified generation per problem; OpenThoughts first rows; traces over 12K characters skipped; trace as reasoning_content, solution as content",
+    "documents": 131
+   }
+  },
+  "prose.jsonl": {
+   "weight": 15.0,
+   "share": 0.15789473684210525,
+   "calibration_rows": 154,
+   "calibration_tokens": 315392,
+   "calibration_documents": 339,
+   "heldout_rows": 10,
+   "heldout_documents": 22,
+   "sha256": "8d51e88b9bd7f5af5e13b10b1971719cefdce25ac5c49858c6e325081af1c4d6",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-edu",
+    "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+    "licence": "ODC-By 1.0",
+    "taken": "config sample-10BT, first rows with edu score >= 3",
+    "documents": 402
+   }
+  },
+  "zh.jsonl": {
+   "weight": 8.0,
+   "share": 0.08421052631578947,
+   "calibration_rows": 82,
+   "calibration_tokens": 167936,
+   "calibration_documents": 178,
+   "heldout_rows": 5,
+   "heldout_documents": 14,
+   "sha256": "3af2b30c3ea300cbb3656eae99327490160e866fb0c64ea2e967d53f0f14771a",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/cmn_Hani/test, first rows",
+    "documents": 295
+   }
+  },
+  "structured.jsonl": {
+   "weight": 5.0,
+   "share": 0.05263157894736842,
+   "calibration_rows": 52,
+   "calibration_tokens": 106496,
+   "calibration_documents": 258,
+   "heldout_rows": 3,
+   "heldout_documents": 12,
+   "sha256": "da21e658a92ccce40e288fe451b629960c6785b0cfa63169ceed95aa4c19c1d2",
+   "meta": {
+    "dataset": "NousResearch/hermes-function-calling-v1 + bigcode/commitpackft",
+    "revision": "dae3e1d28cfbcf4b915c04ea1e072030529b4bda + fc56fe33c030c6daa414c2b112c932b8eed085e6",
+    "licence": "Apache-2.0 + MIT",
+    "taken": "half Hermes function-calling chats (func-calling, json-mode-agentic, func-calling-singleturn; tools passed to the chat template), half commitpackft JSON files over 300 characters and markdown files with tables",
+    "documents": 357
+   }
+  },
+  "fr.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 11,
+   "calibration_tokens": 22528,
+   "calibration_documents": 21,
+   "heldout_rows": 1,
+   "heldout_documents": 5,
+   "sha256": "9885c9dacf024feae9ca2c53457cd249ac9fec9aaa41ff085962742cb71b684e",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/fra_Latn/test, first rows",
+    "documents": 35
+   }
+  },
+  "de.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 11,
+   "calibration_tokens": 22528,
+   "calibration_documents": 35,
+   "heldout_rows": 1,
+   "heldout_documents": 2,
+   "sha256": "01481badd250aad278bdabec94b7a9c3488fc055211554df94a6e9da76c8acc7",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/deu_Latn/test, first rows",
+    "documents": 47
+   }
+  },
+  "es.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 10,
+   "calibration_tokens": 20480,
+   "calibration_documents": 30,
+   "heldout_rows": 1,
+   "heldout_documents": 6,
+   "sha256": "b3b5aa9f940b0d7be11ef1872508ad2bb2a4f23705560f9034b396d86907f549",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/spa_Latn/test, first rows",
+    "documents": 40
+   }
+  },
+  "pt.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 10,
+   "calibration_tokens": 20480,
+   "calibration_documents": 31,
+   "heldout_rows": 1,
+   "heldout_documents": 5,
+   "sha256": "eb645de1efc9922801d9cabdfc8c8ee8111ccd175bb90e5c96ce15a5f4948be7",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/por_Latn/test, first rows",
+    "documents": 44
+   }
+  },
+  "it.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 10,
+   "calibration_tokens": 20480,
+   "calibration_documents": 23,
+   "heldout_rows": 1,
+   "heldout_documents": 4,
+   "sha256": "33037abd698eb916aac41df88e639136fe636dee0c4dc993ba2ba423ffc4fc10",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/ita_Latn/test, first rows",
+    "documents": 39
+   }
+  },
+  "ja.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 10,
+   "calibration_tokens": 20480,
+   "calibration_documents": 21,
+   "heldout_rows": 1,
+   "heldout_documents": 3,
+   "sha256": "99fc0701badc49d7c684bb61426c548b159d7ab46e0889a7bee7edce3c006b20",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/jpn_Jpan/test, first rows",
+    "documents": 39
+   }
+  },
+  "ko.jsonl": {
+   "weight": 1.0,
+   "share": 0.010526315789473684,
+   "calibration_rows": 10,
+   "calibration_tokens": 20480,
+   "calibration_documents": 24,
+   "heldout_rows": 0,
+   "heldout_documents": 0,
+   "sha256": "4a6afaed2f49cf0a4a9df265562b8961ac525c5ed399673546806ee2ed9dea18",
+   "meta": {
+    "dataset": "HuggingFaceFW/fineweb-2",
+    "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+    "licence": "ODC-By 1.0",
+    "taken": "data/kor_Hang/test, first rows",
+    "documents": 57
+   }
+  }
+ },
+ "rows": 1041,
+ "calibration_rows": 977,
+ "heldout_rows": 64,
+ "seq": 2048,
+ "seed": 0,
+ "tokenizer": "/m/GLM-5.3-BF16",
+ "eos": 154820,
+ "positions": "every row starts at position 0; calibration never sees positions past 2048",
+ "layout": "calibration rows (shuffled), then held-out rows from documents the calibration rows never see"
+}

@@ -1,0 +1,7 @@
+{
+ "dataset": "open-r1/OpenR1-Math-220k + open-thoughts/OpenThoughts-114k",
+ "revision": "e4e141ec9dea9f8326f4d347be56105859b2bd68 + bd093c3994fd54d2390985b66988ddf282a55eb6",
+ "licence": "Apache-2.0 (both)",
+ "taken": "half each by characters; OpenR1 default config, first math-verified generation per problem; OpenThoughts first rows; traces over 12K characters skipped; trace as reasoning_content, solution as content",
+ "documents": 131
+}

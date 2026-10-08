@@ -1,0 +1,7 @@
+{
+ "dataset": "bigcode/commitpackft",
+ "revision": "fc56fe33c030c6daa414c2b112c932b8eed085e6",
+ "licence": "MIT (dataset); permissively licensed source repositories only",
+ "taken": "languages rust, python, typescript, c, c++, cuda, go, shell, yaml, toml, dockerfile, makefile, cmake, equal shares; half new_contents as whole files (path line first), half commits rendered as message + unified diff",
+ "documents": 1709
+}

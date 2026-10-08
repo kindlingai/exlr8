@@ -1,0 +1,7 @@
+{
+ "dataset": "NousResearch/hermes-function-calling-v1 + bigcode/commitpackft",
+ "revision": "dae3e1d28cfbcf4b915c04ea1e072030529b4bda + fc56fe33c030c6daa414c2b112c932b8eed085e6",
+ "licence": "Apache-2.0 + MIT",
+ "taken": "half Hermes function-calling chats (func-calling, json-mode-agentic, func-calling-singleturn; tools passed to the chat template), half commitpackft JSON files over 300 characters and markdown files with tables",
+ "documents": 357
+}

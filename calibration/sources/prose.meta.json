@@ -1,0 +1,7 @@
+{
+ "dataset": "HuggingFaceFW/fineweb-edu",
+ "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+ "licence": "ODC-By 1.0",
+ "taken": "config sample-10BT, first rows with edu score >= 3",
+ "documents": 402
+}

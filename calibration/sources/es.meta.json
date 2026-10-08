@@ -1,0 +1,7 @@
+{
+ "dataset": "HuggingFaceFW/fineweb-2",
+ "revision": "af9c13333eb981300149d5ca60a8e9d659b276b9",
+ "licence": "ODC-By 1.0",
+ "taken": "data/spa_Latn/test, first rows",
+ "documents": 40
+}
