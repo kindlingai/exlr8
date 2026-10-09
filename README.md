@@ -99,7 +99,7 @@ an error costs a lot. Small ones mark directions the data almost never visits, w
 When `H = I`: `E` reduces to `‖Δ‖²`, which is the uncalibrated case.
 
 To build `H` we ran the BF16 model one layer at a time over about 2 million calibration tokens: code, reasoning and maths, several
-languages, structured logs, and your scrubbed Claude Code sessions. At every expert we added `x xᵀ` for each token routed to it.
+languages, structured logs, and scrubbed Claude Code sessions (not part of the published calibration set). At every expert we added `x xᵀ` for each token routed to it.
 A rarely used expert sees few tokens, so its `H` is a poor estimate:
 
 We add damping, `H + λI` with `λ = 0.025 × the mean diagonal`, which pulls `H` toward the identity.
