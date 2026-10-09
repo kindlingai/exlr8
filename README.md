@@ -30,6 +30,112 @@ is 2.3–33× better than round-to-nearest at the same bit width.
 
 ---
 
+## The math, for beginners
+
+GLM-5.3 is a mixture-of-experts model. Most of its weights sit in the routed experts: each of the 78 main layers
+has 256 experts, and each token uses only a few of them. Each expert holds three matrices:
+
+ - gate: 2048 × 6144
+ - up: 2048 × 6144
+ - down: 6144 × 2048
+
+The hidden size is 6144, and the expert’s inner size is 2048. A matrix only ever acts on a vector: `y = W x`.
+
+In BF16 (16 bits per number) the model is about 1.5 TB. For four DGX Sparks we've got 512GB (4 × 128 GB), so the
+experts must drop to about 3.25 bits per weight.
+
+### Step 1: rotate so every number is ordinary
+
+Rounding hurts most when a few weights are huge outliers next to many small ones. A grid fine enough for the
+small ones can’t reach the outliers, and a grid wide enough for the outliers wastes its levels on the small ones.
+
+Here is the fix. Take an orthogonal matrix `Q` (so `QᵀQ = I`) and note that:
+
+`W x = (W Q)(Qᵀ x)`
+
+So we can store `W’ = W Q` in place of `W` and rotate the input by `Qᵀ` at run time. The output is unchanged.
+
+We choose `Q = (random ±1 diagonal) × (Hadamard matrix)`. A Hadamard matrix has entries `±1/√n` and orthogonal rows,
+and a fast transform (like the FFT) applies it in `n log n` steps. Each entry of `W’` is then a sum of many weights
+with random signs. By the central limit theorem, the entries look like a bell curve with no outliers. We rotate
+on both sides of the matrix, and we store the sign vectors with the model (the sg tensors).
+
+We also keep scale vectors: one number per row, and one per block of 128 columns. That lets the coded numbers
+live on a fixed, unit-size bell curve.
+
+### Step 2: the trellis code (where the bits go)
+
+Plain rounding would pick one of `2^K` levels per weight, for example 8 levels at K = 3. EXLR8 uses the EXL3 / QTIP trellis
+code instead, which packs better:
+
+ - Cut `W’` into 16 × 16 tiles of 256 weights each.
+ - Each tile gets one bitstream of 256·K bits.
+ - To decode, slide a 16-bit window along the stream, moving `K` bits each step. Each window position gives a 16-bit number. A cheap fixed function, a kind of hash, turns that number into a value that follows a bell curve. That value is the weight.
+
+Neighbouring weights share most of their window, so you can’t set each weight freely. In return, the values the code
+can reach fill the space far better than a grid of independent levels. The encoder picks the best bitstream with the
+Viterbi algorithm, which finds the cheapest path through a graph of states, as in error-correcting codes.
+
+The “-e4m3” part means each decoded value is rounded to an 8-bit float (FP8 E4M3). The GPU can then multiply in FP8 directly,
+and the encoder includes that rounding when it scores choices, so nothing is lost after encoding.
+
+### Step 3: what calibration and the Hessian add
+
+Without calibration, the encoder minimises plain weight error `‖W − Ŵ‖²`. That error doesn’t measure what matters, which is the
+error in the layer’s output on real inputs:
+
+`E = Σ over inputs x of ‖(W − Ŵ) x‖²`
+
+Put the calibration inputs as columns of a matrix X, and let `Δ = W − Ŵ`. Then:
+
+`E = trace(Δ X Xᵀ Δᵀ) = trace(Δ H Δᵀ), with H = X Xᵀ`
+
+What `H` is: `H` is a symmetric n × n matrix: 6144 × 6144 for gate and up, 2048 × 2048 for down. It is called the _Hessian_ because
+it is the second derivative of E with respect to the weights.
+
+What `H` tells you: its eigenvectors show which input directions real data actually uses. Large eigenvalues mark directions where
+an error costs a lot. Small ones mark directions the data almost never visits, where an error is nearly free.
+
+When `H = I`: `E` reduces to `‖Δ‖²`, which is the uncalibrated case.
+
+To build `H` we ran the BF16 model one layer at a time over about 2 million calibration tokens: code, reasoning and maths, several
+languages, structured logs, and your scrubbed Claude Code sessions. At every expert we added `x xᵀ` for each token routed to it.
+A rarely used expert sees few tokens, so its `H` is a poor estimate:
+
+We add damping, `H + λI` with `λ = 0.025 × the mean diagonal`, which pulls `H` toward the identity.
+
+Under 500 tokens, we use the identity H. Between 500 and 2000 tokens, we add extra damping.
+
+`H` gets rotated with the same `Q` as the weights, so it lives in the same coordinates.
+
+### Step 4: LDLQ (using H while encoding)
+
+LDLQ is the same method as GPTQ. It encodes the columns of `W’` one block at a time (16 columns, one tile wide).
+After each block, it changes the not-yet-encoded columns so they cancel the error just made, in the directions H says matter.
+
+How H drives it: you factor `H = L D Lᵀ`, with `L` lower triangular and `D` diagonal. The entries of `L` say how much of
+each finished column’s error to push into each later column.
+
+Why it can work: a weight’s error can be undone by changing other weights that see correlated inputs.
+
+### Step 5: different bit widths per piece
+
+Each expert matrix is split into 16 pieces (the "halves") of 128 inner channels × 6144, about 786k weights each. Each piece
+is encoded at `K` = 2, 3 and 4 bits, and a manifest picks one width per piece. The goal is the lowest total error estimate
+within a byte budget, which is a knapsack problem.
+
+ - home: the main mix, averaging 3.25 bits on the experts.
+ - down1: one step down, about 2.25 bits.
+ - up1: one step up, about 4 bits.
+
+### So...
+
+EXLR8 rotates each weight matrix so its numbers look like a bell curve. It codes them at 2-4 bits per weight with a trellis
+code tuned for the GPU’s FP8. It uses `H = XXᵀ` from real text so the rounding errors accumulate in the less-important weights.
+
+
+---
+
 ## The math, step by step
 
 The first EXLR8 quant is GLM-5.3 from z.ai:
