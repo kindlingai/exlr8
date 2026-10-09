@@ -9,8 +9,8 @@ On unified memory hardware, **decode speed is bound by how many bytes of expert 
 per token**, so the format is engineered around one question: *fewest bytes read, fewest surprises
 at load time.*
 
-The codec itself is borrowed: each 16×16 weight tile is EXL3's trellis code (QTIP-style). This is a
-path through a 16-bit-state trellis where every weight contributes K new bits, chosen by Viterbi 
+Ancestral note: The codec itself is borrowed: each 16×16 weight tile is EXL3's trellis code (QTIP-style).
+This is a path through a 16-bit-state trellis where every weight contributes K new bits, chosen by Viterbi 
 search.
 
 What EXLR8 adds is:
@@ -49,9 +49,7 @@ experts must drop to about 3.25 bits per weight.
 Rounding hurts most when a few weights are huge outliers next to many small ones. A grid fine enough for the
 small ones can’t reach the outliers, and a grid wide enough for the outliers wastes its levels on the small ones.
 
-Here is the fix. Take an orthogonal matrix `Q` (so `QᵀQ = I`) and note that:
-
-`W x = (W Q)(Qᵀ x)`
+Here is the fix: Take an orthogonal matrix `Q` (so `QᵀQ = I`) and note that `W x = (W Q)(Qᵀ x)`.
 
 So we can store `W’ = W Q` in place of `W` and rotate the input by `Qᵀ` at run time. The output is unchanged.
 
@@ -179,8 +177,7 @@ runtime.
 Why: with 8 experts active per token, per-expert hidden-side rotations would force the
 kernel to rotate the activation 8 times (or keep 8 rotated copies). With shared signs and
 block-constant scales, the activation is rotated **once**, and one A operand serves all 8 experts'
-matmuls. Measured cost: NMSE ratio 0.9996–1.0003 vs. per-expert signs (i.e. free); MoE prefill
-23.07 → 18.67 ms at layer 40/M=4096 (16.5 ms with FP8 activations; reference kernel 31.8–36.9 ms).
+matmuls. Measured cost: NMSE ratio 0.9996–1.0003 vs. per-expert signs (i.e. free).
 
 ### 2. The trellis code (EXL3/QTIP)
 
@@ -192,8 +189,8 @@ state carries information between neighboring weights, so K bits per weight here
 independent bits would.
 
 A tile of K-bit weights is `256 × K` bits = **32·K bytes**, packed exactly as exllamav3's
-`pack_trellis` packs it: 16K little-endian int16 values in tensor-core order. Decoding is
-exllamav3's `reconstruct` plus the E4M3 rounding below.
+packs it: 16K little-endian int16 values in tensor-core order. Decoding is the same algorithm
+as exllamav3 plus the E4M3 rounding below.
 
 ### 3. FP8-rounded codebook (the codec-level delta)
 
@@ -258,11 +255,9 @@ For TP = N, half h of expert e in layer L lives on rank:
 rank = (16e + h + L) mod N
 ```
 
-One rule serves every N from 3 to 7; nothing is rewritten per topology. At TP=4 each rank owns
-exactly 4 of every expert's 16 halves (rank r owns h0, h0+4, h0+8, h0+12 with h0 = (r − L) mod 4).
-Kernels get a pointer table `ptr[e][h]` (null = not owned) instead of contiguous ranges, and per-half widths are
-fine because the table is re-read every launch — which also later allows paging weights in from
-mapped files.
+One rule works for every N from 3 to 7. At TP=4 each rank gets exactly 4 of every expert's 16 halves
+(rank r owns h0, h0+4, h0+8, h0+12 with h0 = (r − L) mod 4). Kernels get a pointer table `ptr[e][h]` 
+instead of contiguous ranges, and per-half widths are fine because the table is re-read every launch.
 
 ---
 
@@ -276,7 +271,3 @@ mapped files.
 | Rounding | LDLQ against calibration Hessians, per tensor | calibrated LDLQ with pooled/damped Hessians, shared across widths |
 | Rotation | per-tensor side vectors | shared per-layer hidden-side rotation → one activation rotate per token |
 | Topology | format knows nothing about TP | one sharding rule for TP=3–7; range-fetchable slices |
-
-The one-line version: **EXL3 is a codec; EXLR8 is a codec plus the entire serving geometry of a
-744B MoE on GB10 — bytes read per token are the design target, and every deviation from stock EXL3
-serves that.**
