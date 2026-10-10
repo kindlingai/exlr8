@@ -59,5 +59,5 @@ w = layer.half(7, "gate", 3, K=3)          # one 128-channel half as (in, out) f
 gate = layer.projection(7, "gate", 3)      # the whole projection at K3, as the HF weight (2048, 6144)
 ```
 
-Config, tokenizer and chat template come from
-[zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16).
+The checkpoint's repository also holds the base model's config, tokenizer and chat template (from
+[zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16), unchanged).
