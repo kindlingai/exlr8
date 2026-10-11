@@ -36,7 +36,7 @@ python -m loader.exlr8 glm53-exlr8 --manifest home --layer 40 --verify --out lay
 
 | option | meaning |
 |---|---|
-| `--manifest` | `home` (default), `down1`, `up1`, or the path of a manifest file |
+| `--manifest` | `home` (default), `down1`, `up1`, `bit225`, `bit243`, `bit260`, `bit325`, `bit338`, or the path of a manifest file |
 | `--layer` | a layer number (0-78), or `vocab` for the embedding, `lm_head` and the final norm |
 | `--out` | write the tensors to a safetensors file; without it the loader prints their names and shapes |
 | `--dtype` | `bf16` (default) or `fp32`, for matrices; norms and biases keep their stored dtype |

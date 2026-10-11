@@ -127,6 +127,8 @@ within a byte budget, which is a knapsack problem.
  - home: the main mix, averaging 3.25 bits on the experts.
  - down1: one step down, about 2.25 bits.
  - up1: one step up, about 4 bits.
+ - bit225, bit243, bit260, bit325, bit338: about 2.25 to 3.38 bits on the routed experts, spent where they lower the
+   KL divergence against BF16 the most.
 
 ### So...
 

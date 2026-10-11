@@ -100,6 +100,9 @@ def codebook(states):
     def fp16(v):
         return ((v ^ 0x8000) - 0x8000).to(torch.int16).view(torch.float16)
     v = (fp16(x & 0xFFFF) + fp16(x >> 16)).float()
+    # IMPORTANT: round to E4M3 here, even when the output is BF16 or FP32. The encoder rounded every codebook value
+    # to E4M3 inside its Viterbi search, so the stored states are the best choice for the rounded values, not the
+    # fp16 ones. Skipping the rounding decodes different weights (+2.3% error in the README's measurement).
     return v.clamp(-448, 448).to(torch.float8_e4m3fn).float()
 
 
@@ -317,7 +320,8 @@ def load_vocab(root, dtype=torch.bfloat16, device="cpu", verify=False):
 def main():
     ap = argparse.ArgumentParser(description="Decode one exlr8 v2 layer into HF GLM-5.3 tensors.")
     ap.add_argument("dir", help="the release directory (experts/, dense/, manifests/)")
-    ap.add_argument("--manifest", default="home", help="home, down1, up1, or a manifest file")
+    ap.add_argument("--manifest", default="home",
+                    help="home, down1, up1, bit225, bit243, bit260, bit325, bit338, or a manifest file")
     ap.add_argument("--layer", required=True, help="layer number, or vocab")
     ap.add_argument("--out", help="write the tensors to this safetensors file")
     ap.add_argument("--dtype", choices=("bf16", "fp32"), default="bf16")
