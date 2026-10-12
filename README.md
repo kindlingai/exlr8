@@ -28,7 +28,7 @@ What EXLR8 adds is:
 Decode quality comes from calibrated rounding (GPTQ/LDLQ against real activation statistics), which
 is 2.3–33× better than round-to-nearest at the same bit width.
 
-A pure-PyTorch reference loader for the format is in [`loader/`](loader/).
+A pure-PyTorch reference loader for the format is in [`loader/`](loader/). Every file and tensor is listed in [FORMAT.md](FORMAT.md).
 
 ---
 
