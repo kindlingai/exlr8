@@ -418,7 +418,7 @@ def write_layer(
                      trellis_files=",".join(_file_names(layer_id, k)[0] for k in chosen),
                      pad_halves=str(pad_halves).lower(),
                      sharding="half h of expert e at TP=N goes to rank (16e + h + L) mod N; shared expert follows routed experts",
-                     checksum="xxhash64 seed 0 per (expert, projection, half)",
+                     checksum="xxhash64 seed 0 per (expert, projection, half) over the half's trellis bytes (no padding), then its 128 intermediate-side fp16 values (gate/up svh, down suh), then the projection's hidden-side fp16 block scales (gate/up su_block, down sv_block)",
                      error_inputs="provider supplied held-out errors" if has_errors else "none: no error tables")
     writer = _SafetensorsWriter(out_path / index_name, tensor_defs, meta)
     index_size, index_hash = _write_arrays(writer, arrays)
