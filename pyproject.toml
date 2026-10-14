@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exlr8writer"
+version = "0.1.0"
+description = "Provider based writer for EXLR8 model filesets"
+readme = "exlr8writer/README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["numpy>=1.24", "xxhash>=3.4"]
+
+[tool.setuptools]
+packages = ["exlr8writer"]
+
+[tool.setuptools.package-data]
+exlr8writer = ["py.typed"]

@@ -30,6 +30,8 @@ is 2.3–33× better than round-to-nearest at the same bit width.
 
 A pure-PyTorch reference loader for the format is in [`loader/`](loader/). Every file and tensor is listed in [FORMAT.md](FORMAT.md).
 
+The provider based Python fileset writer is in [`exlr8writer/`](exlr8writer/). It connects to a caller's checkpoint or quantization workflow through a small layer data hook.
+
 ---
 
 ## The math, for beginners
