@@ -22,6 +22,10 @@ import torch
 HIDDEN, HALVES, EXPERTS = 6144, 16, 256
 PROJS = ("gate", "up", "down")
 MCG = 0xCBAC1FED
+MUL1 = 0x83DCD12D
+# mul1's scale and offset, exactly the fp16 bit patterns the kernel holds: v = fp16(1024 + byte_sum) * C + D.
+C_MUL1 = 0.00676727294921875    # fp16 0x1EEE
+D_MUL1 = -10.3828125            # fp16 0xC931
 TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32 = 1, 2, 3, 4, 5, 6, 7     # record field 0
 IN = 2                                  # record field 4: 0 replicated, 1 output side, 2 input side
 DATA = {TRELLIS: ("trellis", "suh", "svh"), INT4: ("q4", "s4"), MXFP8: ("fp8", "e8m0"), FP8_BLOCK: ("fp8", "scale"),
@@ -91,22 +95,43 @@ def tile_perm():
     return torch.tensor(perm)
 
 
-def codebook(states):
-    """16-bit trellis states -> fp32 weights: the mcg codebook, then E4M3 rounding (round to nearest even,
-    saturating). The rounding is part of the format."""
-    x = ((states & 0xFFFF) * MCG) & 0xFFFFFFFF
-    x = (x & 0x8FFF8FFF) ^ 0x3B603B60
+def codebook(states, name="mcg"):
+    """16-bit trellis states -> fp32 weights: the file's codebook, then E4M3 rounding (round to nearest even,
+    saturating). The rounding is part of the format. The codebook comes from the trellis tensor name: bare for
+    mcg, suffixed otherwise."""
+    if name == "mcg":
+        x = ((states & 0xFFFF) * MCG) & 0xFFFFFFFF
+        x = (x & 0x8FFF8FFF) ^ 0x3B603B60
 
-    def fp16(v):
-        return ((v ^ 0x8000) - 0x8000).to(torch.int16).view(torch.float16)
-    v = (fp16(x & 0xFFFF) + fp16(x >> 16)).float()
+        def fp16(v):
+            return ((v ^ 0x8000) - 0x8000).to(torch.int16).view(torch.float16)
+        v = (fp16(x & 0xFFFF) + fp16(x >> 16)).float()
+    elif name == "mul1":
+        x = ((states & 0xFFFF) * MUL1) & 0xFFFFFFFF
+        byte_sum = sum((x >> shift) & 0xFF for shift in (0, 8, 16, 24))
+        # fp16 0x6400 is 1024.0 and the binade's ulp is 1, so 1024 + byte_sum is exact. The kernel's fused
+        # multiply-add rounds once: double here, then fp16, gives the same bits.
+        v = ((1024 + byte_sum).double() * C_MUL1 + D_MUL1).half().float()
+    else:
+        raise ValueError(f"unknown codebook {name!r}")
     # IMPORTANT: round to E4M3 here, even when the output is BF16 or FP32. The encoder rounded every codebook value
     # to E4M3 inside its Viterbi search, so the stored states are the best choice for the rounded values, not the
     # fp16 ones. Skipping the rounding decodes different weights (+2.3% error in the README's measurement).
     return v.clamp(-448, 448).to(torch.float8_e4m3fn).float()
 
 
-def decode_tiles(raw, K):
+def file_codebook(f):
+    """A trellis file's codebook, from its tensor names: `trellis.gate` is mcg, `trellis.gate.mul1` is mul1.
+
+    Raises ValueError if the file mixes codebooks, which no writer produces.
+    """
+    found = {n.rsplit(".", 1)[1] for n in f.names() if "trellis." in n} - set(PROJS)
+    if len(found) > 1:
+        raise ValueError(f"trellis file mixes codebooks {sorted(found)}")
+    return found.pop() if found else "mcg"
+
+
+def decode_tiles(raw, K, cb="mcg"):
     """Packed tiles, uint8 [n, 32K] -> fp32 [n, 16, 16], (input, output) within each tile."""
     n = raw.shape[0]
     b = raw.reshape(n, 16 * K, 2).long()
@@ -117,19 +142,19 @@ def decode_tiles(raw, K):
     for j in range(-(-16 // K)):                     # tail-biting: the 16 bits that end with value i
         states |= torch.roll(vals, j, dims=1) << (j * K)
     out = torch.empty(n, 256, device=raw.device)
-    out[:, tile_perm().to(raw.device)] = codebook(states)
+    out[:, tile_perm().to(raw.device)] = codebook(states, cb)
     return out.view(n, 16, 16)
 
 
-def tiles_out_major(raw, K, rows, cols):
+def tiles_out_major(raw, K, rows, cols, cb="mcg"):
     """A run of tiles stored [k16][c = 0..7] (gate/up halves, dense entries on the output side) -> (rows, 128)."""
-    return decode_tiles(raw.view(-1, 32 * K), K).view(rows // 16, cols // 16, 16, 16) \
+    return decode_tiles(raw.view(-1, 32 * K), K, cb).view(rows // 16, cols // 16, 16, 16) \
         .permute(0, 2, 1, 3).reshape(rows, cols)
 
 
-def tiles_in_major(raw, K, cols):
+def tiles_in_major(raw, K, cols, cb="mcg"):
     """A run of tiles stored [b][r = 0..7][c = 0..7] (down halves, dense entries on the input side) -> (128, cols)."""
-    return decode_tiles(raw.view(-1, 32 * K), K).view(cols // 128, 8, 8, 16, 16) \
+    return decode_tiles(raw.view(-1, 32 * K), K, cb).view(cols // 128, 8, 8, 16, 16) \
         .permute(1, 3, 0, 2, 4).reshape(128, cols)
 
 
@@ -166,8 +191,10 @@ class ExpertLayer:
         self.base = base
 
     def trellis_file(self, K):
+        """(file, codebook) for width K."""
         if K not in self.files:
-            self.files[K] = SafeFile(f"{self.base}.k{K}.safetensors")
+            f = SafeFile(f"{self.base}.k{K}.safetensors")
+            self.files[K] = (f, file_codebook(f))
         return self.files[K]
 
     def half(self, e, p, h, K, verify=False):
@@ -178,7 +205,8 @@ class ExpertLayer:
             raise ValueError(f"layer {self.L} expert {e} {p}: K{K} is not stored")
         k = f"{pre}k{K}."
         off, length = (int(v) for v in self.t[k + "index"][j, PROJS.index(p), h])
-        raw = self.trellis_file(K).read(off, length)
+        f, cb = self.trellis_file(K)
+        raw = f.read(off, length)
         c = slice(128 * h, 128 * h + 128)
         if p == "down":
             chan, block = self.t[k + "down.suh"][j, c], self.t[k + "down.sv_block"][j]
@@ -191,10 +219,10 @@ class ExpertLayer:
                 raise ValueError(f"layer {self.L} expert {e} {p} half {h} K{K}: checksum {got:#x}, expected {want:#x}")
         raw, chan, block = raw.to(self.device), chan.to(self.device), block.float().to(self.device)
         if p == "down":
-            T = tiles_in_major(raw, K, HIDDEN)
+            T = tiles_in_major(raw, K, HIDDEN, cb)
             svh = self.t["signs.out"].to(self.device).float() * block.repeat_interleave(128)
             return reconstruct(T, chan, svh)
-        T = tiles_out_major(raw, K, HIDDEN, 128)
+        T = tiles_out_major(raw, K, HIDDEN, 128, cb)
         suh = self.t["signs.in"].to(self.device).float() * block.repeat_interleave(128)
         return reconstruct(T, suh, chan)
 

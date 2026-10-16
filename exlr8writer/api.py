@@ -18,6 +18,10 @@ import xxhash
 
 ALIGN = 1 << 16
 PROJECTIONS = ("gate", "up", "down")
+# Trellis codebooks, by the name a ``codebook`` string starts with, and the multiplier it must also give. mcg is
+# the unmarked default; any other codebook suffixes the trellis tensor names, so a reader that does not implement
+# it fails to find the tensor rather than decoding with the wrong hash.
+CODEBOOKS = {"mcg": "0xCBAC1FED", "mul1": "0x83DCD12D"}
 SIDES = {
     "gate": ("svh", "su_block"),
     "up": ("svh", "su_block"),
@@ -214,12 +218,32 @@ def _checksum(trellis: bytes, intermediate: np.ndarray, hidden_blocks: np.ndarra
     return digest.intdigest()
 
 
+def _codebook_name(codebook: str) -> str:
+    """The codebook a ``codebook`` metadata string names: its first word, which must be known and must agree with
+    the multiplier the rest of the string gives.
+
+    Raises ValueError for anything else.
+    """
+    name = codebook.split(" ", 1)[0]
+    multiplier = CODEBOOKS.get(name)
+    if not multiplier or multiplier.lower() not in codebook.lower():
+        raise ValueError(f"codebook {codebook!r} is not one of {sorted(CODEBOOKS)} with its multiplier")
+    return name
+
+
+def _trellis_tensor(prefix: str, projection: str, codebook: str) -> str:
+    """The trellis tensor name of one projection, suffixed for every codebook but mcg."""
+    suffix = "" if codebook == "mcg" else f".{codebook}"
+    return f"{prefix}trellis.{projection}{suffix}"
+
+
 def _tensor_shape(array: np.ndarray) -> tuple[int, ...]:
     return tuple(int(x) for x in array.shape)
 
 
 def _validate_layer(layer: LayerData) -> None:
     meta = layer.metadata
+    _codebook_name(meta.codebook)
     if meta.routed_experts < 1 or len(layer.experts) != meta.routed_experts:
         raise ValueError(f"layer {layer.layer_id}: expected {meta.routed_experts} routed experts, got {len(layer.experts)}")
     if meta.hidden_size % 128 or meta.intermediate_size % 128:
@@ -274,6 +298,7 @@ def _write_width(layer: LayerData, width: int, out: Path, pad_halves: bool) -> t
     per_expert = [e.widths[width] for e in layer.experts] if all(width in e.widths for e in layer.experts) else []
     shared = layer.shared_expert.widths[width] if layer.shared_expert and width in layer.shared_expert.widths else None
     half_bytes = meta.hidden_size * 128 * width // 8
+    codebook = _codebook_name(meta.codebook)
     units = meta.intermediate_size // 128
     stride = ((half_bytes + ALIGN - 1) // ALIGN) * ALIGN if pad_halves else half_bytes
     trellis_tensors: list[tuple[str, str, tuple[int, ...]]] = []
@@ -281,14 +306,15 @@ def _write_width(layer: LayerData, width: int, out: Path, pad_halves: bool) -> t
         if not present:
             continue
         for projection in PROJECTIONS:
-            trellis_tensors.append((f"{prefix}trellis.{projection}", "U8", (len(present) * units * stride,)))
+            trellis_tensors.append((_trellis_tensor(prefix, projection, codebook), "U8",
+                                    (len(present) * units * stride,)))
     trellis_meta = _metadata(layer, "trellis", k=str(width), index_file=_file_names(layer.layer_id, width)[1], pad_halves=str(pad_halves).lower())
     writer = _SafetensorsWriter(out / trellis_name, trellis_tensors, trellis_meta)
     for prefix, experts in (("", per_expert), ("shared.", [shared] if shared else [])):
         if not experts:
             continue
         for pi, projection in enumerate(PROJECTIONS):
-            name = f"{prefix}trellis.{projection}"
+            name = _trellis_tensor(prefix, projection, codebook)
             pos = 0
             writer.begin(name)
             for expert in experts:
@@ -454,10 +480,11 @@ def _rebuild_index(layer: LayerData, width: int, experts: Sequence[EncodedExpert
     if pad_halves:
         stride = ((stride + ALIGN - 1) // ALIGN) * ALIGN
     units = layer.metadata.intermediate_size // 128
+    codebook = _codebook_name(layer.metadata.codebook)
     indices = np.zeros((len(experts), 3, units, 2), dtype=np.int64)
     checksums = np.zeros((len(experts), 3, units), dtype=np.uint64)
     for pi, projection in enumerate(PROJECTIONS):
-        info = header[f"{prefix}trellis.{projection}"]
+        info = header[_trellis_tensor(prefix, projection, codebook)]
         start = data_start + info["data_offsets"][0]
         for ei, expert in enumerate(experts):
             item = expert.widths[width][projection]
