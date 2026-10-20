@@ -268,11 +268,12 @@ def _file_names(layer_id: int, width: int) -> tuple[str, str]:
     return f"exlr8-layer-{layer_id:03d}.k{width}.safetensors", f"exlr8-layer-{layer_id:03d}.index.safetensors"
 
 
-def _write_width(layer: LayerData, width: int, out: Path, pad_halves: bool) -> tuple[int, dict[str, object]]:
+def _write_width(layer: LayerData, width: int, out: Path, pad_halves: bool,
+                 *, include_routed: bool, include_shared: bool) -> tuple[int, dict[str, object]]:
     meta = layer.metadata
     trellis_name, _ = _file_names(layer.layer_id, width)
-    per_expert = [e.widths[width] for e in layer.experts] if all(width in e.widths for e in layer.experts) else []
-    shared = layer.shared_expert.widths[width] if layer.shared_expert and width in layer.shared_expert.widths else None
+    per_expert = [e.widths[width] for e in layer.experts] if include_routed else []
+    shared = layer.shared_expert.widths[width] if include_shared and layer.shared_expert else None
     half_bytes = meta.hidden_size * 128 * width // 8
     units = meta.intermediate_size // 128
     stride = ((half_bytes + ALIGN - 1) // ALIGN) * ALIGN if pad_halves else half_bytes
@@ -360,7 +361,9 @@ def write_layer(
     for width in chosen:
         if width not in routed_widths and width not in shared_available:
             continue
-        file_size, file_record = _write_width(layer, width, out_path, pad_halves)
+        file_size, file_record = _write_width(layer, width, out_path, pad_halves,
+                                             include_routed=width in routed_widths,
+                                             include_shared=width in shared_available)
         records.append(file_record)
 
     # Build the index tensors from the same input payloads, following FORMAT.md.
