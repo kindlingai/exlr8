@@ -22,11 +22,10 @@ What EXLR8 adds is:
 3. **Rotation is shared, not per-expert**: one sign vector per layer on the hidden side, so the
    kernel rotates the token's activation once and reuses it across all 8 active experts.
 4. **The layout is TP-native**: a single sharding rule serves TP=3–7 with zero re-layout, and a
-   node can fetch only its own slices over HTTP range requests (~75 GB per node at TP=4 under the
+   node can fetch only its own slices over HTTP range requests (about 75 GB per node at TP=4 under the
    `home` manifest, instead of the whole checkpoint).
 
-Decode quality comes from calibrated rounding (GPTQ/LDLQ against real activation statistics), which
-is 2.3–33× better than round-to-nearest at the same bit width.
+Decode quality comes from calibrated rounding (GPTQ/LDLQ against real activation statistics).
 
 A pure-PyTorch reference loader for the format is in [`loader/`](loader/). Every file and tensor is listed in [FORMAT.md](FORMAT.md).
 
@@ -100,13 +99,9 @@ an error costs a lot. Small ones mark directions the data almost never visits, w
 
 When `H = I`: `E` reduces to `‖Δ‖²`, which is the uncalibrated case.
 
-To build `H` we ran the BF16 model one layer at a time over about 2 million calibration tokens: code, reasoning and maths, several
-languages, structured logs, and scrubbed Claude Code sessions (not part of the published calibration set). At every expert we added `x xᵀ` for each token routed to it.
-A rarely used expert sees few tokens, so its `H` is a poor estimate:
-
-We add damping, `H + λI` with `λ = 0.025 × the mean diagonal`, which pulls `H` toward the identity.
-
-Under 500 tokens, we use the identity H. Between 500 and 2000 tokens, we add extra damping.
+To build `H` we ran the BF16 model one layer at a time over about 2 million calibration tokens. At every expert we added
+`x xᵀ` for each token routed to it. A rarely used expert sees few tokens, so its `H` is a poor estimate, and the encoder
+regularises it before use.
 
 `H` gets rotated with the same `Q` as the weights, so it lives in the same coordinates.
 
@@ -123,8 +118,7 @@ Why it can work: a weight’s error can be undone by changing other weights that
 ### Step 5: different bit widths per piece
 
 Each expert matrix is split into 16 pieces (the "halves") of 128 inner channels × 6144, about 786k weights each. Each piece
-is encoded at `K` = 2, 3 and 4 bits, and a manifest picks one width per piece. The goal is the lowest total error estimate
-within a byte budget, which is a knapsack problem.
+is encoded at `K` = 2, 3 and 4 bits, and a manifest picks one width per piece.
 
  - home: the main mix, averaging 3.25 bits on the experts.
  - down1: one step down, about 2.25 bits.
@@ -171,19 +165,18 @@ w = R( diag(suh) · L(T) ) · diag(svh)
 
 where `T` is the tile decoded from the trellis, `L`/`R` apply the 128-block Hadamard on the
 input/output side, and `suh`/`svh` are the stored side vectors (sign × scale, folded together).
-A global scale `g` per (projection, width) — found by golden-section search on [0.1, 1.9] — is
-folded into `suh` so decoded values come out at the right magnitude.
+A global scale `g` per (projection, width) is folded into `suh` so decoded values come out at the
+right magnitude.
 
 **The sharing trick.** The hidden side's signs (`signs.in`, `signs.out`, 6144 values each) are
-**one vector per layer**, shared by all 256 experts, the shared expert, and all three widths
-(sequences drawn from seed `1234 + layer`). The intermediate side keeps per-expert signs, but they
+**one vector per layer**, shared by all 256 experts, the shared expert, and all three widths. The intermediate side keeps per-expert signs, but they
 are folded into the stored per-channel vectors, so they live inside the weights and cost nothing at
 runtime. 
 
 Why: with 8 experts active per token, per-expert hidden-side rotations would force the
 kernel to rotate the activation 8 times (or keep 8 rotated copies). With shared signs and
 block-constant scales, the activation is rotated **once**, and one A operand serves all 8 experts'
-matmuls. Measured cost: NMSE ratio 0.9996–1.0003 vs. per-expert signs (i.e. free).
+matmuls.
 
 ### 2. The trellis code (EXL3/QTIP)
 
@@ -204,15 +197,8 @@ Every value the codebook produces is rounded to **E4M3 (round-to-nearest-even, s
 the Viterbi search**. The search therefore only considers paths whose decoded weights are exactly
 representable in FP8, and prefill can feed decoded weights straight to FP8 tensor-core MMA.
 
-Cost of doing it inside vs. after the search (NMSE ratio vs. fp16 codebook, lower is better):
-
-| where rounded | K3 | K4 |
-|---|---|---|
-| inside the search (exlr8) | 0.9993 | 1.0000 |
-| after the search | +4.0% error | +15.3% error |
-
-A stock EXL3 decoder reading the same files without the rounding gets **+2.3% error** — the rounding
-is part of the format, and loaders must apply it.
+The rounding is part of the format: a decoder that skips it, a stock EXL3 decoder included, reads
+measurably worse weights from the same files, so loaders must apply it.
 
 ### 4. Calibration — the Hessians and LDLQ
 
@@ -221,21 +207,15 @@ Round-to-nearest ignores how weights are actually *used*. EXLR8 doesn't:
 - For each routed expert e, calibration data gives
   `H_gu[e] = Σ x xᵀ` over tokens routed to e (x = the 6144-wide expert input, shared by gate and
   up), and `H_down[e] = Σ a aᵀ` (a = `silu(gate x) ⊙ up x`, 2048-wide). The calibration set is
-  977 rows / 2.0M tokens (+64 held-out rows); the least-routed expert still sees ~13k tokens
-  (median ~61k). Hessians are damped (σ = 0.025 × mean diag) and optionally shrunk toward a pooled
-  prior for thin experts.
+  977 rows / 2.0M tokens (+64 held-out rows).
 - The Hessian is pulled into the quantizer's rotated domain (`H' = S D Had H Had D S`) and
   factorized in 16×16 blocks: `H = L D Lᵀ`.
 - **LDLQ** then walks the input rows *from the last 16-row block to the first*: each block is
   quantized *after* adding the error already committed by the blocks behind it (fed back through
   `L`), and its own residual error is fed forward. Error cancellation along the input dimension is
-  what calibrated rounding buys: **−14% held-out layer error vs. identity-Hessian encoding**
-  (layer 40: 0.1644 → 0.1413), and round-to-nearest is **2.3–33× worse** than LDLQ at the same
-  format. One reason RTN loses so badly: these Hessians are near rank-one (massive activations —
-  one eigendirection holds 7–95% of the trace), and only feedback-based rounding can cancel error
-  along that direction.
+  what calibrated rounding buys.
 
-### 5. Widths — three encodes, one knapsack
+### 5. Widths — three encodes, one manifest
 
 Trellis codes **don't nest** (a 2-bit path is not a prefix of the 3-bit path), so each expert is
 encoded **separately at K2, K3 and K4** — one file set per width. A layer's 256 experts cost
@@ -249,7 +229,7 @@ At **load time**, a manifest picks the width per unit:
 - **down: per expert** (LDLQ error feedback crosses halves along the input dimension — down's input
   *is* the intermediate — so its width must be uniform across the expert).
 
-Choosing widths is a knapsack under a per-rank memory budget, driven by per-half/per-expert error
+A deployment picks widths to fit its per-rank memory budget, using the per-half and per-expert error
 tables recorded at encode time. The shipped `home` manifest (64 experts at K4, 192 at K3 ≈ 3.25
 bits/weight) holds 3.93 GB per layer ≈ **75 GB per node at TP=4**.
 
@@ -274,6 +254,6 @@ instead of contiguous ranges, and per-half widths are fine because the table is 
 | Code | trellis, K bits/weight, mcg codebook | same codec + E4M3 rounding inside the search |
 | Codebook values | fp16 | exactly E4M3 (prefill on FP8 MMA) |
 | Granularity | one width per tensor | three widths stored; per-half manifest at load |
-| Rounding | LDLQ against calibration Hessians, per tensor | calibrated LDLQ with pooled/damped Hessians, shared across widths |
+| Rounding | LDLQ against calibration Hessians, per tensor | LDLQ against calibration Hessians, shared across widths |
 | Rotation | per-tensor side vectors | shared per-layer hidden-side rotation → one activation rotate per token |
 | Topology | format knows nothing about TP | one sharding rule for TP=3–7; range-fetchable slices |
