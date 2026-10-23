@@ -60,6 +60,9 @@ hashes/<path>.sha256                           "<sha256> <bytes>"; expert files 
 | `__metadata__.format` | `exlr8-v2` (`exlr8-v2-index-slice` for index slices) |
 | `__metadata__.scheme` | `exlr8-e4m3-v2` |
 
+Index slices are the exception: they are packed, with the header padded with spaces to a multiple of 8, tensors in
+order of decreasing item size and then by name (so each is naturally aligned), no `__pad.N` and no `scheme`.
+
 ## experts/exlr8-layer-LLL.kK.safetensors
 
 | tensor | dtype | shape | contents |
@@ -227,6 +230,7 @@ All units rank R owns at TP = N, width K; one tensor set per MoE layer `Lnnn` (e
 | metadata | contents |
 |---|---|
 | `tp`, `rank`, `k`, `layers`, `half_bytes`, `rule`, `files` | slice identity |
+| `hidden_size`, `n_routed_experts`, and the other model metadata keys | as in the index files; absent for GLM-5.3 |
 | `set_id` | sha256 of lines `"<path> <bytes> <sha256>\n"` over `experts/*` and `dense/*`, sorted by path |
 | `index_sha256` | JSON {layer: sha256 of its index file} |
 | `source` | release name and version |
