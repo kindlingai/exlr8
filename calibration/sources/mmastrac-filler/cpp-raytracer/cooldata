@@ -1,0 +1,106 @@
+# object
+# xlat x y z
+# scale x y z
+# rotatex angle
+# rotatey angle
+# rotatez angle
+# matrix a b c d e f g h i j k l m n o p
+# ior n         
+# ambient n
+#       Default: 0.2
+# diffuse n
+#       Default: 0.7
+# specular n
+#       Default: 0
+# color r g b
+#       Default: 1 1 1
+#       The surface color of the object.
+# filter n
+#       Default: 0
+#       Multiplied by color seen by transmission (refraction)
+#       (1-filter)*(color)*(ray)
+# transmit n
+#       Default: 0
+#       Amount of light from transmission (refraction)
+# reflect n
+#       Default: 0
+#       Amount of light from reflection
+# end
+# eyepoint 0 2.5 -5
+camera
+eyepoint 0 2.5 -8
+lookat 0.0 1.5 0
+up 0 1 0
+right 1 0 0
+fov 60
+res 1024 768
+oversampling 1
+end
+
+light
+point
+position 10 20 -10
+color .7 .7 .7
+end
+
+light
+point
+position -30 17 -14
+color .5 .5 .5
+end
+
+sphere
+translate 0 2 0
+scale 2 1 1
+color 1 0 0
+specular 1
+diffuse 0.1
+ambient 0.1
+reflect 0.2
+filter 0.7
+ior 1.3
+caustic 1.0
+end
+
+sphere
+translate -1 3 2
+color 0 1 0
+specular 1
+diffuse 0.1
+ambient 0.1
+reflect 0.2
+filter 0.7
+ior 1.3
+caustic 1.0
+end
+
+sphere
+translate +1 4 2
+color 0 1 1
+specular 1
+diffuse 0.1
+ambient 0.1
+reflect 0.2
+filter 0.7
+ior 1.3
+caustic 1.0
+end
+
+plane
+color 1 1 1
+specular 1
+end
+
+# sphere
+# xlat 0 1 0
+# color 1 0 0
+# end
+
+# box
+# color 0 1 0
+# end
+
+# plane
+# color 0 0 1
+# end
+

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<se-lint-ignore>
+	<file path="local.css">
+		<ignore>
+			<code>c-008</code>
+			<reason>::after styles cannot be simplified when content text is unique</reason>
+		</ignore>
+	</file>
+	<file path="a.xhtml">
+		<ignore>
+			<code>t-057</code>
+			<reason>Lowercase is correct here</reason>
+		</ignore>
+	</file>
+</se-lint-ignore>
