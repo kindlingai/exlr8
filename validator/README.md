@@ -32,7 +32,7 @@ Exit status 0 means no check failed (warnings allowed), 1 means at least one fai
 | vocab | missing `embed_tokens`, `lm_head` (unless tied) or `norm.weight`, or shapes that disagree with `config.json` | |
 | optional members | `dense/vision-bf16.safetensors` with no tensors, tensors outside `model.visual.*`, or exlr8 records | |
 | expert indexes | metadata (`layer`, sizes, `experts`, `widths`, `trellis_files`) that disagrees with `config.json`; a missing, misshaped or unexpected tensor | |
-| expert trellis files | a missing `kK` file for a stored width, a `kK` file for a width the index does not store, wrong metadata or tensor sizes | |
+| expert trellis files | a missing `kK` file for a stored width, a `kK` file for a width the index does not store, wrong metadata or tensor sizes, trellis names that mix codebooks or disagree with the `codebook` metadata | |
 | expert offsets | an index entry that does not point at unit u of expert e in its `kK` file, or a unit length other than H·16·K | |
 | error tables | partial or misshaped `err_gate`/`err_up`/`err_down`/`heldout_tokens` | an index file with no error tables |
 | manifests | wrong `format`/`name`, a missing or extra MoE layer, width tables of the wrong shape, a width the index does not store, a referenced weight file (dense, index or `kK`) that is missing | |

@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass, field
 
 ALIGN = 65536
+CODEBOOKS = {"mcg": "0xCBAC1FED", "mul1": "0x83DCD12D"}
 PROJS = ("gate", "up", "down")
 DTYPE_SIZE = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1, "I16": 2, "U16": 2, "F16": 2, "BF16": 2,
               "I32": 4, "U32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
@@ -829,11 +830,26 @@ class Validator:
                 continue
             B = H * 16 * K
             S = -(-B // ALIGN) * ALIGN if pad == "true" else B
+            # FORMAT.md "Codebook": mcg keeps the bare names, any other codebook suffixes them and names itself in
+            # the file's metadata, as its first word followed somewhere by its multiplier.
+            found = {(n.split("trellis.", 1)[1].split(".", 1) + ["mcg"])[1] for n in sf.names() if "trellis." in n}
+            if len(found) > 1:
+                fail(f"trellis tensors mix codebooks {sorted(found)}")
+                continue
+            cb = found.pop() if found else "mcg"
+            if cb not in CODEBOOKS:
+                fail(f"unknown codebook {cb!r}")
+                continue
+            named = sf.meta.get("codebook")
+            if (named is not None or cb != "mcg") and (
+                    (named or "").split(" ", 1)[0] != cb or CODEBOOKS[cb].lower() not in (named or "").lower()):
+                fail(f"tensor names select {cb} but metadata codebook is {named!r}")
+            sfx = "" if cb == "mcg" else f".{cb}"
             want = {}
             if K in widths:
-                want.update({f"trellis.{p}": ("U8", [E * U * S]) for p in PROJS})
+                want.update({f"trellis.{p}{sfx}": ("U8", [E * U * S]) for p in PROJS})
             if K in shared:
-                want.update({f"shared.trellis.{p}": ("U8", [U * S]) for p in PROJS})
+                want.update({f"shared.trellis.{p}{sfx}": ("U8", [U * S]) for p in PROJS})
             ok = True
             for name, spec in want.items():
                 got = sf.shape(name)
@@ -850,10 +866,11 @@ class Validator:
             for pre, n, present in (("", E, K in widths), ("shared.", 1, K in shared)):
                 if not present or index.shape(f"{pre}k{K}.index") != ("I64", [n, 3, U, 2]):
                     continue
-                checked += self.offsets(L, K, pre, n, index, sf, S, B)
+                checked += self.offsets(L, K, pre, n, index, sf, S, B, sfx)
         return checked
 
-    def offsets(self, L: int, K: int, pre: str, n: int, index: SafeFile, sf: SafeFile, S: int, B: int) -> int:
+    def offsets(self, L: int, K: int, pre: str, n: int, index: SafeFile, sf: SafeFile, S: int, B: int,
+                sfx: str = "") -> int:
         """index[e, p, u] = (absolute byte offset of unit u in the kK file, B); unit u of expert e at (U e + u) S."""
         U = self.geo.units
         table = index.int64s(f"{pre}k{K}.index")
@@ -861,7 +878,7 @@ class Validator:
         first = None
         for e in range(n):
             for p, proj in enumerate(PROJS):
-                base = sf.start + sf.tensors[f"{pre}trellis.{proj}"]["begin"]
+                base = sf.start + sf.tensors[f"{pre}trellis.{proj}{sfx}"]["begin"]
                 for u in range(U):
                     i = ((e * 3 + p) * U + u) * 2
                     off, nb = table[i], table[i + 1]

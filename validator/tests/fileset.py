@@ -53,6 +53,7 @@ def i64(*xs: int) -> bytes:
     return struct.pack(f"<{len(xs)}q", *xs)
 
 
+CODEBOOKS = {"mul1": "mul1 0x83DCD12D, E4M3 rounding"}
 MODEL_META = {"format": "exlr8-v2", "scheme": "exlr8-e4m3-v2", "hidden_size": str(H),
               "moe_intermediate_size": str(I), "n_routed_experts": str(E), "num_hidden_layers": str(LAYERS),
               "first_moe_layer": str(FIRST_MOE), "model": "Test"}
@@ -96,28 +97,32 @@ def vocab_file(root: str) -> None:
     write_safetensors(os.path.join(root, "dense", "exlr8-vocab.safetensors"), t, dict(MODEL_META, contents="vocab"))
 
 
-def expert_layer(root: str, L: int, widths: list[int], shared: list[int], errors: bool = True) -> None:
-    """One MoE layer's index and kK files, offsets laid out as FORMAT.md says."""
+def expert_layer(root: str, L: int, widths: list[int], shared: list[int], errors: bool = True,
+                 codebooks: dict[int, str] | None = None) -> None:
+    """One MoE layer's index and kK files, offsets laid out as FORMAT.md says. codebooks maps a width to a
+    codebook other than mcg, which suffixes that file's trellis names and names itself in its metadata."""
     base = os.path.join(root, "experts", f"exlr8-layer-{L:03d}")
     offsets = {}
     stored = sorted(set(widths) | set(shared))
     for K in stored:
         B = H * 16 * K
-        t = [(f"trellis.{p}", "U8", [E * U * B], None) for p in ("gate", "up", "down") if K in widths]
-        t += [(f"shared.trellis.{p}", "U8", [U * B], None) for p in ("gate", "up", "down") if K in shared]
+        cb = (codebooks or {}).get(K)
+        sfx = f".{cb}" if cb else ""
+        t = [(f"trellis.{p}{sfx}", "U8", [E * U * B], None) for p in ("gate", "up", "down") if K in widths]
+        t += [(f"shared.trellis.{p}{sfx}", "U8", [U * B], None) for p in ("gate", "up", "down") if K in shared]
         meta = dict(MODEL_META, contents="trellis", layer=str(L), k=str(K), pad_halves="false",
                     index_file=f"exlr8-layer-{L:03d}.index.safetensors", gate_up_order="grouped",
-                    down_order="item128")
-        offsets[K] = (write_safetensors(f"{base}.k{K}.safetensors", t, meta), B)
+                    down_order="item128", **({"codebook": CODEBOOKS[cb]} if cb else {}))
+        offsets[K] = (write_safetensors(f"{base}.k{K}.safetensors", t, meta), B, sfx)
     t = [("signs.in", "I8", [H], None), ("signs.out", "I8", [H], None)]
     for pre, n, ks in (("", E, widths), ("shared.", 1, shared)):
         for K in ks:
-            off, B = offsets[K]
+            off, B, sfx = offsets[K]
             idx = []
             for e in range(n):
                 for p in ("gate", "up", "down"):
                     for u in range(U):
-                        idx += [off[f"{pre}trellis.{p}"] + (U * e + u) * B, B]
+                        idx += [off[f"{pre}trellis.{p}{sfx}"] + (U * e + u) * B, B]
             p = f"{pre}k{K}."
             t += [(p + "index", "I64", [n, 3, U, 2], i64(*idx)), (p + "checksum", "U64", [n, 3, U], None),
                   (p + "gate.svh", "F16", [n, I], None), (p + "gate.su_block", "F16", [n, H // 128], None),
@@ -213,7 +218,7 @@ def vision_file(root: str) -> None:
 
 
 def build(root: str, *, errors: bool = True, manifests: bool = True, slices: bool = True,
-          sidecars: bool = True) -> str:
+          sidecars: bool = True, codebooks: dict[int, str] | None = None) -> str:
     """A complete, valid fileset at root."""
     for d in ("dense", "experts"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
@@ -230,7 +235,7 @@ def build(root: str, *, errors: bool = True, manifests: bool = True, slices: boo
         dense_file(root, L)
     vocab_file(root)
     for L in range(FIRST_MOE, LAYERS + MTP):
-        expert_layer(root, L, layer_widths(L), shared_widths(L), errors=errors)
+        expert_layer(root, L, layer_widths(L), shared_widths(L), errors=errors, codebooks=codebooks)
     sid = set_id(root)
     if manifests:
         manifest(root, "home", sid)

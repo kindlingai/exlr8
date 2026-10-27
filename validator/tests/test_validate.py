@@ -224,6 +224,44 @@ class Experts(Base):
         self.assertStatus(self.run_validator(), "error tables", "fail", "partial error tables, missing k2.err_down")
 
 
+class Codebooks(Base):
+    """K4 in mul1 beside mcg K2 and K3, as FORMAT.md allows."""
+    build_args = {"codebooks": {4: "mul1"}}
+    rel = "experts/exlr8-layer-001.k4.safetensors"
+
+    def rewrite(self, rename=lambda n: n, **meta) -> None:
+        """Rewrite the K4 trellis file in place. The header is padded to 64 KiB, so the index offsets still hold."""
+        sf = v.SafeFile(self.p(self.rel))
+        t = [(rename(n), sf.tensors[n]["dtype"], sf.tensors[n]["shape"], None) for n in sf.names()]
+        fs.write_safetensors(self.p(self.rel), t, {**sf.meta, **meta})
+
+    def test_full(self):
+        self.assertClean(self.run_validator(full=True))
+
+    def test_metadata_names_another_codebook(self):
+        self.rewrite(codebook="mcg 0xCBAC1FED, E4M3 rounding")
+        self.assertStatus(self.run_validator(), "expert trellis files", "fail",
+                          "tensor names select mul1 but metadata codebook is 'mcg 0xCBAC1FED, E4M3 rounding'")
+
+    def test_wrong_multiplier(self):
+        self.rewrite(codebook="mul1 0xCBAC1FED, E4M3 rounding")
+        self.assertStatus(self.run_validator(), "expert trellis files", "fail", "tensor names select mul1")
+
+    def test_mcg_names_with_mul1_metadata(self):
+        self.rewrite(lambda n: n.removesuffix(".mul1"))
+        self.assertStatus(self.run_validator(), "expert trellis files", "fail",
+                          "tensor names select mcg but metadata codebook is 'mul1 0x83DCD12D, E4M3 rounding'")
+
+    def test_mixed_names(self):
+        self.rewrite(lambda n: n.removesuffix(".mul1") if n == "trellis.up.mul1" else n)
+        self.assertStatus(self.run_validator(), "expert trellis files", "fail",
+                          "trellis tensors mix codebooks ['mcg', 'mul1']")
+
+    def test_unknown_codebook(self):
+        self.rewrite(lambda n: n.replace(".mul1", ".mul2"), codebook="mul2 0x12345678")
+        self.assertStatus(self.run_validator(), "expert trellis files", "fail", "unknown codebook 'mul2'")
+
+
 class NoErrorTables(Base):
     build_args = {"errors": False}
 
@@ -408,19 +446,24 @@ class WriterOutput(Base):
             return EncodedExpert(e, {K: {p: proj(p, K) for p in ("gate", "up", "down")} for K in ks}, 100)
 
         class Provider:
-            def get_layer(self, layer_id):
-                return LayerData(layer_id, ModelMetadata(E, H, I), np.ones(H, np.int8), np.ones(H, np.int8),
-                                 [expert(e, (2, 3, 4)) for e in range(E)], expert(E, (3, 4)))
+            def __init__(self, codebook):
+                self.codebook = codebook
 
-        for name in os.listdir(self.p("experts")):
-            if name.startswith("exlr8-layer-001."):
-                os.remove(self.p(f"experts/{name}"))
-                os.remove(os.path.join(self.root, "hashes", name + ".sha256"))
-        write_layer(Provider(), 1, self.p("experts"), hashes=os.path.join(self.root, "hashes"))
-        r = self.run_validator(full=True)
-        for check in ("layout", "safetensors", "expert indexes", "expert trellis files", "expert offsets",
-                      "error tables", "hash sidecars"):
-            self.assertStatus(r, check, "pass")
+            def get_layer(self, layer_id):
+                return LayerData(layer_id, ModelMetadata(E, H, I, codebook=self.codebook), np.ones(H, np.int8),
+                                 np.ones(H, np.int8), [expert(e, (2, 3, 4)) for e in range(E)], expert(E, (3, 4)))
+
+        for codebook in ("mcg 0xCBAC1FED, E4M3 rounding", fs.CODEBOOKS["mul1"]):
+            with self.subTest(codebook=codebook):
+                for name in os.listdir(self.p("experts")):
+                    if name.startswith("exlr8-layer-001."):
+                        os.remove(self.p(f"experts/{name}"))
+                        os.remove(os.path.join(self.root, "hashes", name + ".sha256"))
+                write_layer(Provider(codebook), 1, self.p("experts"), hashes=os.path.join(self.root, "hashes"))
+                r = self.run_validator(full=True)
+                for check in ("layout", "safetensors", "expert indexes", "expert trellis files", "expert offsets",
+                              "error tables", "hash sidecars"):
+                    self.assertStatus(r, check, "pass")
 
 
 if __name__ == "__main__":
