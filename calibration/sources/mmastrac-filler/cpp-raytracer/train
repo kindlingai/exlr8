@@ -1,0 +1,218 @@
+#camera
+#eyepoint 5 2.5 0
+#lookat 3 1.5 0
+
+camera
+eyepoint 0 2.5 -5
+lookat 1.5 1.5 0
+up 0 1 0
+right 1 0 0
+fov 60
+res 800 600
+oversampling 1
+end
+
+light
+point
+position 10 20 -10
+color .5 .5 .5
+end
+
+light
+point
+position -30 17 -14
+color .5 .5 .5
+end
+
+#light
+#point
+#position 30 25 45
+#color 1 1 1
+#end
+
+sphere
+translate 0.2 2 0
+scale 0.7 1 1
+color 1 0 0
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 1 2 0
+scale 0.5 1 1
+color 0.9 0 0
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 1.5 1.5 0
+scale 0.5 0.5 0.5
+color 0.8 0 0.1
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 2.0 1.5 0
+scale 0.5 0.5 0.5
+color 0.7 0 0.2
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 2.5 1.5 0
+scale 0.5 0.5 0.5
+color 0.6 0 0.3
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 3.0 1.5 0
+scale 0.5 0.5 0.5
+color 0.5 0 0.4
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 3.0 2.5 0
+scale 0.5 1 0.5
+color 0.2 0.2 0.2
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 3.0 0.5 -0.5
+scale 0.5 0.5 0.25
+color 0.2 0.2 0.2
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 3.0 0.5 +0.5
+scale 0.5 0.5 0.25
+color 0.2 0.2 0.2
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 0.5 0.5 -0.5
+scale 0.5 0.5 0.25
+color 0.2 0.2 0.2
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+sphere
+translate 0.5 0.5 +0.5
+scale 0.5 0.5 0.25
+color 0.2 0.2 0.2
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end
+
+triangle
+translate 4.2 1 0
+scale 1.5 1.5 1.5
+rotatez -30
+rotatex -45
+rotatey 45
+color 0.5 0.5 0.5
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end 
+
+triangle
+translate 4.2 1 0
+rotatez -30
+rotatex -180
+rotatex 45
+rotatey 45
+scale 1.5 1.5 1.5
+color 0.5 0.5 0.5
+reflect 0.2
+filter 0.7
+specular 1
+ior 1.3
+end 
+
+triangle
+translate 0 0 100
+scale 50 50 50
+rotatex 90
+rotatey 45
+color 0.3 0.3 0.3
+ambient 0.4
+end
+
+triangle
+translate 50 0 101
+scale 50 50 50
+rotatex 90
+rotatey 45
+color 0.3 0.3 0.3
+ambient 0.4
+end
+
+sphere
+translate 80 20 101
+scale 10 10 10
+color 1 0.7 0
+ambient 1
+diffuse 0
+specular 0
+end
+
+square
+translate 0 0.1 102
+scale 200 200 200
+color 0 0 1
+reflect 0.4
+end   
+
+plane
+translate 0 0 400
+rotatex 90
+rotatey 90
+color 0.3 0.3 1
+end
+
+plane
+color 1 1 0
+end
+
+
+
+
+

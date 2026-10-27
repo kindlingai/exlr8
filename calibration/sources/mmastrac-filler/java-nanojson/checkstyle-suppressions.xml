@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+
+<!DOCTYPE suppressions PUBLIC
+     "-//Puppy Crawl//DTD Suppressions 1.0//EN"
+     "http://www.puppycrawl.com/dtds/suppressions_1_0.dtd">
+
+<suppressions>
+	<suppress checks="InnerAssignment" files="JsonParser.java"/>
+	<suppress checks="VisibilityModifier" files="JsonParser.java"/>
+	
+	<suppress checks="InnerAssignment" files="JsonTokener.java"/>
+	<suppress checks="MagicNumber" files="JsonTokener.java"/>
+	
+	<suppress checks="MagicNumber" files="JsonWriterBase.java"/>
+
+	<suppress checks="InnerAssignment" files="JsonReader.java"/>
+
+	<suppress checks=".*" files="Users.java"/>
+</suppressions>
