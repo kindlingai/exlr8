@@ -158,6 +158,9 @@ codebook suffixes them and sets `codebook` in the trellis file's metadata. Resol
 is present. The name carries it so that a reader cannot decode one codebook's codes with another's hash, which
 yields plausible wrong weights and no error.
 
+Each trellis file selects its own codebook, so the widths of one layer may use different codebooks. The index
+file's `codebook` records the encode it was written from and selects nothing.
+
 ## Sharding
 
 | unit | rank at TP = N |
