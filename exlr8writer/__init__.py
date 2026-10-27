@@ -8,6 +8,7 @@ from .api import (
     ProjectionData,
     write_layer,
 )
+from .slices import release_set_id, write_index_slices
 
 __all__ = [
     "EncodedExpert",
@@ -15,5 +16,7 @@ __all__ = [
     "LayerProvider",
     "ModelMetadata",
     "ProjectionData",
+    "release_set_id",
+    "write_index_slices",
     "write_layer",
 ]

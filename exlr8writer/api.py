@@ -274,6 +274,7 @@ def _metadata(layer: LayerData, contents: str, **extra: str) -> dict[str, str]:
     values = {
         "format": "exlr8-v2", "contents": contents, "scheme": model.scheme,
         "layer": str(layer.layer_id), "routed_experts": str(model.routed_experts),
+        "n_routed_experts": str(model.routed_experts),
         "hidden_size": str(model.hidden_size), "moe_intermediate_size": str(model.intermediate_size),
         "hessian": model.hessian, "hessian_rule": model.hessian_rule, "codebook": model.codebook,
         "encoder_commit": model.encoder_commit, "exllamav3_version": model.exllamav3_version,

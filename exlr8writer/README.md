@@ -103,8 +103,39 @@ the optional `hashes` directory, and
 returns a summary with paths, sizes, hashes, selected widths, and whether the
 expert prefix is partial. See the repository’s [format specification](../FORMAT.md)
 for the tensor definitions and sharding rules. This package writes expert
-files; dense weights, vocabulary files, manifests, tokenizer files, and the
-Hugging Face index are assembled by the surrounding model workflow.
+files and index slices; dense weights, vocabulary files, manifests, tokenizer
+files, and the Hugging Face index are assembled by the surrounding model
+workflow.
+
+Models other than GLM-5.3 put the model metadata keys of the format
+specification (`model`, `num_hidden_layers`, `first_moe_layer`,
+`tensor_prefix`) in `ModelMetadata.extra`, so that every index file carries
+them.
 
 For large layers, providers can back NumPy arrays with memory mapped storage
 instead of keeping every tensor resident in RAM.
+
+## Index slices
+
+Once a release's expert files are written, `write_index_slices` cuts the index
+slices for each TP size and width from the layer index files:
+
+```python
+from exlr8writer import release_set_id, write_index_slices
+
+sid = release_set_id("build")              # reads every weight file under build/experts and build/dense
+write_index_slices(
+    "build/experts",
+    "build/index-slices",
+    tp_sizes=(1, 2, 3, 4),
+    widths=(2, 3, 4),
+    set_id=sid,
+    source="org/model@revision",
+    hashes="build/hashes/index-slices",
+)
+```
+
+It writes `tp<N>/k<K>/rank<r>.safetensors` and a SHA256 sidecar for each.
+`release_set_id` reads every weight file once; to skip that, pass a
+`{"set_id": ..., "index_sha256": {file name: sha256}}` mapping from another
+source, such as the hashes a Hugging Face file listing reports.

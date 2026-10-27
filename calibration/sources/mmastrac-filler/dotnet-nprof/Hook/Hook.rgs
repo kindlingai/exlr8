@@ -1,0 +1,11 @@
+HKCR
+{
+	NoRemove AppID
+	{
+		'%APPID%' = s 'NProfHook'
+		'NProfHook.DLL'
+		{
+			val AppID = s '%APPID%'
+		}
+	}
+}
