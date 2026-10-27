@@ -1,0 +1,170 @@
+Features:
+---------
+
+        Our assignment comes with these bonus features:
+        We implemented the following primitives usiing our ray tracer
+                - sphere
+                - plane
+                - square
+                - triangle
+        We also implemented the following thing you can change for each object
+                - ambient light
+                - diffuse
+                - specular
+                - filter
+                - transmit 
+                - reflect
+                - ior
+                - caustic
+        What you see in the GL window is what you get plus a plane.  
+        Our ray tracer uses a script language that we developed so the ray tracer 
+        is independent of Lab 2
+
+
+How to run:
+-----------
+        in the lab2 directory
+	        type make
+	in the lab3 directory 
+                type make (this makes the ray tracer program)
+        
+        type ./lab2  in the lab2 directory
+
+Scripts
+-------
+        See the example scripts called example1 or train too see how a script works.
+ 
+        Running a script
+        in the lab 3 directory type
+                ./rt script_file_name | xv -
+
+
+Lab 2 addons 
+------------
+
+
+Open file:
+----------
+	Use File -> Open to open the sample programs called:
+		sample1 sample2 example1 example2 clown
+
+Saving a file
+-------------
+	Use File -> Save to save the current list to a file
+
+Exporting a file
+----------------
+        Use File -> Export to convert your current opengl window to a raytraced one
+
+Creating a list
+---------------	
+	On runing ./lab1 a QTwindow apears called "Control Window".
+	
+	Adding a Node.
+		Use the Add button to add a node to the right of the
+		current Node you are at in the list.
+	
+	Deleting a Node
+		Use the Delete button to delete the current node you are
+		at. 
+	
+	Naming a Node
+		Use the Name: edit box to enter the name of the current
+		node u are at.
+		
+	Node ID.
+		The Node ID is read only and is set when the add command
+		is used 
+
+	Matrix Frame
+		The Matrix frame contains an editable 4x4 matrix all
+		elemnets of the matrix can be edited. As the nodes are
+		traversed the matrix changes.
+		
+		Load Identity button
+			This button loads the identity matrix into the current
+			matrix.	
+	
+	Matrix Controls Frame
+		The matrix Control frame contains transforms that
+		automaticly updates the current matrix.
+		
+		Add Rotate Button
+			This button add a rotation of degree X  to the
+			current Matrix.  User enters data in degrees.
+                        The first box is for x second for y, and third for z.
+
+		Add Xlat. Button
+			This Button adds a translation in the x,y
+			direction to thecurrent matrix.   
+                        The first box is for x second for y, and third for z.
+		
+		Add Scale Button
+			This Button adds a Scaling Factor in the x,y
+			direction to the current matrix.  
+                        The first box is for x second for y, and third for z.
+		
+		Add Shear Button
+			This Button adds a Shearing Factor in the x,y
+                        direction to the current matrix.  
+                        The first box is for x second for y, and third for z.
+
+	Recursion Frame
+		Link to: Edit Box
+			This edit box is used to specife the name of the
+			Node the current node is to be linked to. 		
+ 		
+		Count: Edit Box
+			This edit box is used to specify the number of
+			time the two nodes should be called in recursion.
+
+	        
+         Primitive frame       
+                Primitive
+                Use the drop down box to select the primitive the current node will point to.
+
+	        The second drop down alows the folloing to be set for each primitive
+                        - ambient light                                                                 0 <= x <= 1
+                        - diffuse                                                                       0 <= x <= 1
+                        - specular                                                                      0 <= x <= 1
+                        - filter        This makes the object filter light                              0 <= x <= 1
+                        - transmit      This makes the object transmit light                            0 <= x <= 1
+                        - reflect       this makes the object reflect light                             0 <= x <= 1
+                        - ior           index of refraction                                             0 <= x <= 1
+                        - caustic       causes a spher to have a piont of light in the filtered shadow  0 <= x <= 1
+                Color        
+                The first box is for red second for green, and third for blue.
+                
+
+        GLWindow at bottom of window
+
+		This window shows the current linked list.  It can be
+		navigated using the left mouse button then moving the mouse, or by using
+		the buttons on either side of the window	 
+
+        Show Axes
+                Turns the Axes on or off for the current node
+                This feature has been removed
+        No perspective
+                Turns perspective view on or off
+                this feature has been removed
+        Recursion
+                Turns recursion on or off
+
+
+
+
+Lab 2 window
+	
+	This window shows the 3D output of the link list.
+        
+        Mouse
+                Use the mouse to rotate, zoom, translate the object in 3d
+        
+        Holding shift then moving the mouse moves the light source
+
+
+
+
+
+

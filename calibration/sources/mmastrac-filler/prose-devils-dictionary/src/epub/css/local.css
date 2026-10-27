@@ -1,0 +1,225 @@
+@charset "utf-8";
+@namespace epub "http://www.idpf.org/2007/ops";
+@namespace xml "http://www.w3.org/XML/1998/namespace";
+
+body [xml|lang]{
+	font-style: italic;
+}
+
+[epub|type~="z3998:signature"]{
+	font-variant: small-caps;
+}
+
+footer{
+	margin-top: 1em;
+	text-align: right;
+}
+
+dd a{
+	font-variant: all-small-caps;
+}
+
+#laureate + dd + dt + dd a{
+	font-variant: normal;
+}
+
+/* Glossary */
+dt > dfn{
+	font-style: normal;
+	font-variant: small-caps;
+}
+
+dd + dt{
+	margin-top: 1em;
+}
+
+dt > dfn::after{
+	content: ".";
+	font-style: italic;
+	font-variant: normal;
+}
+
+dt.eoc > dfn::after{
+	content: " ";
+}
+
+dt.question > dfn::after{
+	content: "";
+}
+
+dt.noun > dfn::after{
+	content: ", n.";
+}
+
+dt.adjective > dfn::after{
+	content: ", adj.";
+}
+
+dt.verb-transitive > dfn::after{
+	content: ", v. t.";
+}
+
+dt.verb-intransitive > dfn::after{
+	content: ", v. i.";
+}
+
+dt.adverb > dfn::after{
+	content: ", adv.";
+}
+
+dt.past-participle > dfn::after{
+	content: ", pp.";
+}
+
+dt.verb > dfn::after{
+	content: ", v.";
+}
+
+dt.pronoun > dfn::after{
+	content: ", pro.";
+}
+
+dt.unknown > dfn::after{
+	content: ", x.";
+}
+
+dt.noun-plural > dfn::after{
+	content: ", n. pl.";
+}
+
+dt.adjective.noun > dfn::after{
+	content: ", adj. and n." !important;
+}
+
+dd > dl{
+	margin-top: 1em;
+}
+
+dd > dl *{
+	display: inline;
+	margin: 0;
+	padding: 0;
+}
+/* End glossary */
+
+dd ol{
+	padding-left: 1em;
+}
+
+/* Poetry */
+[epub|type~="z3998:poem"] p,
+[epub|type~="z3998:verse"] p{
+	text-align: initial;
+	text-indent: 0;
+}
+
+[epub|type~="z3998:poem"] p > span,
+[epub|type~="z3998:verse"] p > span{
+	display: block;
+	padding-left: 1em;
+	text-indent: -1em;
+}
+
+[epub|type~="z3998:poem"] p > span + br,
+[epub|type~="z3998:verse"] p > span + br{
+	display: none;
+}
+
+[epub|type~="z3998:poem"] p + p{
+	margin-top: 1em;
+}
+
+p span.i1{
+	padding-left: 2em;
+	text-indent: -1em;
+}
+
+p span.i2{
+	padding-left: 3em;
+	text-indent: -1em;
+}
+
+p span.i3{
+	padding-left: 4em;
+	text-indent: -1em;
+}
+
+p span.i4{
+	padding-left: 5em;
+	text-indent: -1em;
+}
+
+p span.i5{
+	padding-left: 6em;
+	text-indent: -1em;
+}
+
+p span.i6{
+	padding-left: 7em;
+	text-indent: -1em;
+}
+
+p span.i7{
+	padding-left: 8em;
+	text-indent: -1em;
+}
+
+p span.i9{
+	padding-left: 10em;
+	text-indent: -1em;
+}
+
+p span.i13{
+	padding-left: 14em;
+	text-indent: -1em;
+}
+
+p span.i14{
+	padding-left: 15em;
+	text-indent: -1em;
+}
+/* End Poetry */
+
+/* Drama */
+[epub|type~="z3998:drama"] table{
+	border-collapse: collapse;
+	margin: 1em auto;
+	width: 100%;
+}
+
+[epub|type~="z3998:drama"] tr:first-child td{
+	padding-top: 0;
+}
+
+[epub|type~="z3998:drama"] tr:last-child td{
+	padding-bottom: 0;
+}
+
+[epub|type~="z3998:drama"] td{
+	padding: .5em;
+	vertical-align: top;
+}
+
+[epub|type~="z3998:drama"] td:last-child{
+	padding-right: 0;
+}
+
+[epub|type~="z3998:drama"] td:first-child{
+	padding-left: 0;
+}
+
+[epub|type~="z3998:drama"] td[epub|type~="z3998:persona"]{
+	hyphens: none;
+	-epub-hyphens: none;
+	text-align: right;
+	width: 20%;
+}
+
+[epub|type~="z3998:persona"]{
+	font-variant: all-small-caps;
+}
+/* End Drama */
+
+[epub|type~="se:era"]{
+	font-variant: all-small-caps;
+}

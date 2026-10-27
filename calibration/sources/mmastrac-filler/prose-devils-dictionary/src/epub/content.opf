@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" dir="ltr" prefix="se: https://standardebooks.org/vocab/1.0" unique-identifier="uid" version="3.0" xml:lang="en-US">
+	<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+		<dc:identifier id="uid">url:https://standardebooks.org/ebooks/ambrose-bierce/the-devils-dictionary</dc:identifier>
+		<dc:date>2021-03-16T22:46:04Z</dc:date>
+		<meta property="dcterms:modified">2021-03-16T22:46:04Z</meta>
+		<dc:rights>The source text and artwork in this ebook edition are believed to be in the U.S. public domain. This ebook edition is released under the terms in the CC0 1.0 Universal Public Domain Dedication, available at https://creativecommons.org/publicdomain/zero/1.0/. For full license information see the Uncopyright file included at the end of this ebook.</dc:rights>
+		<dc:publisher id="publisher">Standard Ebooks</dc:publisher>
+		<meta property="file-as" refines="#publisher">Standard Ebooks</meta>
+		<meta property="se:url.homepage" refines="#publisher">https://standardebooks.org</meta>
+		<meta property="se:role" refines="#publisher" scheme="marc:relators">bkd</meta>
+		<meta property="se:role" refines="#publisher" scheme="marc:relators">mdc</meta>
+		<meta property="se:role" refines="#publisher" scheme="marc:relators">pbl</meta>
+		<dc:contributor id="type-designer">The League of Moveable Type</dc:contributor>
+		<meta property="file-as" refines="#type-designer">League of Moveable Type, The</meta>
+		<meta property="se:url.homepage" refines="#type-designer">https://www.theleagueofmoveabletype.com</meta>
+		<meta property="role" refines="#type-designer" scheme="marc:relators">tyd</meta>
+		<link href="http://www.idpf.org/epub/a11y/accessibility-20170105.html#wcag-aa" rel="dcterms:conformsTo"/>
+		<meta property="a11y:certifiedBy">Standard Ebooks</meta>
+		<meta property="schema:accessMode">textual</meta>
+		<meta property="schema:accessModeSufficient">textual</meta>
+		<meta property="schema:accessibilityFeature">readingOrder</meta>
+		<meta property="schema:accessibilityFeature">structuralNavigation</meta>
+		<meta property="schema:accessibilityFeature">tableOfContents</meta>
+		<meta property="schema:accessibilityFeature">unlocked</meta>
+		<meta property="schema:accessibilityHazard">none</meta>
+		<meta property="schema:accessibilitySummary">This publication conforms to WCAG 2.1 Level AA.</meta>
+		<link href="onix.xml" media-type="application/xml" properties="onix" rel="record"/>
+		<dc:title id="title">The Devil’s Dictionary</dc:title>
+		<meta property="file-as" refines="#title">Devil’s Dictionary, The</meta>
+		<dc:subject id="subject-1">English language -- Dictionaries -- Humor</dc:subject>
+		<dc:subject id="subject-2">English language -- Semantics -- Humor</dc:subject>
+		<dc:subject id="subject-3">Vocabulary -- Humor</dc:subject>
+		<meta property="authority" refines="#subject-1">LCSH</meta>
+		<meta property="term" refines="#subject-1">sh2009124970</meta>
+		<meta property="authority" refines="#subject-2">LCSH</meta>
+		<meta property="term" refines="#subject-2">sh42099656</meta>
+		<meta property="authority" refines="#subject-3">LCSH</meta>
+		<meta property="term" refines="#subject-3">sh2010117990</meta>
+		<meta property="se:subject">Satire</meta>
+		<dc:description id="description">A witty, sharp collection of sardonic word definitions from the 1800s and early 1900s that provide a snapshot into the irreverent humor of early American culture.</dc:description>
+		<meta id="long-description" property="se:long-description" refines="#description">
+			&lt;p&gt;“&lt;b&gt;Dictionary&lt;/b&gt;&lt;em&gt;, n&lt;/em&gt;: A malevolent literary device for cramping the growth of a language and making it hard and inelastic. This dictionary, however, is a most useful work.”&lt;/p&gt;
+			&lt;p&gt;&lt;a href="https://standardebooks.org/ebooks/ambrose-bierce"&gt;Bierce’s&lt;/a&gt; groundbreaking &lt;i&gt;Devil’s Dictionary&lt;/i&gt; had a complex publication history. Started in the mid-1800s as an irregular column in Californian newspapers under various titles, he gradually refined the new-at-the-time idea of an irreverent set of glossary-like definitions. The final name, as we see it titled in this work, did not appear until an 1881 column published in the periodical &lt;i&gt;The San Francisco Illustrated Wasp&lt;/i&gt;.&lt;/p&gt;
+			&lt;p&gt;There were no publications of the complete glossary in the 1800s. Not until 1906 did a portion of Bierce’s collection get published by Doubleday, under the name &lt;i&gt;The Cynic’s Word Book&lt;/i&gt;—the publisher not wanting to use the word “Devil” in the title, to the great disappointment of the author. The 1906 word book only went from A to L, however, and the remainder was never released under the compromised title.&lt;/p&gt;
+			&lt;p&gt;In 1911 the &lt;i&gt;Devil’s Dictionary&lt;/i&gt; as we know it was published in complete form as part of Bierce’s collected works (volume 7 of 12), including the remainder of the definitions from M to Z. It has been republished a number of times, including more recent efforts where older definitions from his columns that never made it into the original book were included. Due to the complex nature of copyright, some of those found definitions have unclear public domain status and were not included. This edition of the book includes, however, a set of definitions attributed to his one-and-only “Demon’s Dictionary” column, including Bierce’s classic definition of A: “the first letter in every properly constructed alphabet.”&lt;/p&gt;
+			&lt;p&gt;Bierce enjoyed “quoting” his pseudonyms in his work. Most of the poetry, dramatic scenes and stories in this book attributed to others were self-authored and do not exist outside of this work. This includes the prolific &lt;em&gt;Father Gassalasca Jape&lt;/em&gt;, whom he thanks in the preface—“jape” of course having the definition: “a practical joke.”&lt;/p&gt;
+			&lt;p&gt;This book is a product of its time and must be approached as such. Many of the definitions hold up well today, but some might be considered less palatable by modern readers. Regardless, the book’s humorous style is a valuable snapshot of American culture from past centuries.&lt;/p&gt;
+		</meta>
+		<dc:language>en-US</dc:language>
+		<dc:source>https://www.gutenberg.org/ebooks/972</dc:source>
+		<dc:source>https://archive.org/details/cu31924014323772</dc:source>
+		<dc:source>https://archive.org/details/san-francisco-newletter-dec-11-1875</dc:source>
+		<meta property="se:production-notes">The format of the dictionary has been modified to use HTML definition lists and a glossary style. Modernization has been applied selectively and less heavily to the stories and poetry that accompany the prose. The definitions for "A" and a number of additional definitions under that letter were restored from a scan of Bierce's Demon's Dictionary column from Dec 11 1875.</meta>
+		<meta property="se:word-count">60991</meta>
+		<meta property="se:reading-ease.flesch">60.55</meta>
+		<meta property="se:url.encyclopedia.wikipedia">https://en.wikipedia.org/wiki/The_Devil%27s_Dictionary</meta>
+		<meta property="se:url.vcs.github">https://github.com/standardebooks/ambrose-bierce_the-devils-dictionary</meta>
+		<dc:creator id="author">Ambrose Bierce</dc:creator>
+		<meta property="file-as" refines="#author">Bierce, Ambrose</meta>
+		<meta property="se:name.person.full-name" refines="#author">Ambrose Gwinnett Bierce</meta>
+		<meta property="se:url.encyclopedia.wikipedia" refines="#author">https://en.wikipedia.org/wiki/Ambrose_Bierce</meta>
+		<meta property="se:url.authority.nacoaf" refines="#author">http://id.loc.gov/authorities/names/n79100683</meta>
+		<meta property="role" refines="#author" scheme="marc:relators">aut</meta>
+		<dc:contributor id="artist">Louis Candide Boulanger</dc:contributor>
+		<meta property="file-as" refines="#artist">Boulanger, Louis Candide</meta>
+		<meta property="se:url.encyclopedia.wikipedia" refines="#artist">https://en.wikipedia.org/wiki/Louis_Boulanger</meta>
+		<meta property="se:url.authority.nacoaf" refines="#artist">http://id.loc.gov/authorities/names/no2008181934</meta>
+		<meta property="role" refines="#artist" scheme="marc:relators">art</meta>
+		<dc:contributor id="transcriber-1">Aloysius</dc:contributor>
+		<meta property="file-as" refines="#transcriber-1">Aloysius</meta>
+		<meta property="role" refines="#transcriber-1" scheme="marc:relators">trc</meta>
+		<dc:contributor id="transcriber-2">David Widger</dc:contributor>
+		<meta property="file-as" refines="#transcriber-2">Widger, David</meta>
+		<meta property="se:url.authority.nacoaf" refines="#transcriber-2">http://id.loc.gov/authorities/names/no2011017869</meta>
+		<meta property="role" refines="#transcriber-2" scheme="marc:relators">trc</meta>
+		<dc:contributor id="producer-1">Matt Mastracci</dc:contributor>
+		<meta property="file-as" refines="#producer-1">Mastracci, Matt</meta>
+		<meta property="se:url.homepage" refines="#producer-1">https://mastracci.com</meta>
+		<meta property="role" refines="#producer-1" scheme="marc:relators">bkp</meta>
+		<meta property="se:role" refines="#producer-1" scheme="marc:relators">blw</meta>
+		<meta property="se:role" refines="#producer-1" scheme="marc:relators">cov</meta>
+		<meta property="se:role" refines="#producer-1" scheme="marc:relators">mrk</meta>
+		<meta property="se:role" refines="#producer-1" scheme="marc:relators">pfr</meta>
+		<meta property="se:role" refines="#producer-1" scheme="marc:relators">tyg</meta>
+		<dc:contributor id="producer-2">Alex Cabal</dc:contributor>
+		<meta property="file-as" refines="#producer-2">Cabal, Alex</meta>
+		<meta property="se:url.homepage" refines="#producer-2">https://alexcabal.com</meta>
+		<meta property="role" refines="#producer-2" scheme="marc:relators">pfr</meta>
+	</metadata>
+	<manifest>
+		<item href="css/core.css" id="core.css" media-type="text/css"/>
+		<item href="css/local.css" id="local.css" media-type="text/css"/>
+		<item href="css/se.css" id="se.css" media-type="text/css"/>
+		<item href="images/cover.svg" id="cover.svg" media-type="image/svg+xml" properties="cover-image"/>
+		<item href="images/logo.svg" id="logo.svg" media-type="image/svg+xml"/>
+		<item href="images/titlepage.svg" id="titlepage.svg" media-type="image/svg+xml"/>
+		<item href="text/a.xhtml" id="a.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/b.xhtml" id="b.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/c.xhtml" id="c.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/colophon.xhtml" id="colophon.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+		<item href="text/d.xhtml" id="d.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/e.xhtml" id="e.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/f.xhtml" id="f.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/g.xhtml" id="g.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/h.xhtml" id="h.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/halftitlepage.xhtml" id="halftitlepage.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/i.xhtml" id="i.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/imprint.xhtml" id="imprint.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+		<item href="text/j.xhtml" id="j.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/k.xhtml" id="k.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/l.xhtml" id="l.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/m.xhtml" id="m.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/n.xhtml" id="n.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/o.xhtml" id="o.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/p.xhtml" id="p.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/preface.xhtml" id="preface.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/q.xhtml" id="q.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/r.xhtml" id="r.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/s.xhtml" id="s.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/t.xhtml" id="t.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/titlepage.xhtml" id="titlepage.xhtml" media-type="application/xhtml+xml" properties="svg"/>
+		<item href="text/u.xhtml" id="u.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/uncopyright.xhtml" id="uncopyright.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/v.xhtml" id="v.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/w.xhtml" id="w.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/x.xhtml" id="x.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/y.xhtml" id="y.xhtml" media-type="application/xhtml+xml"/>
+		<item href="text/z.xhtml" id="z.xhtml" media-type="application/xhtml+xml"/>
+		<item href="toc.xhtml" id="toc.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+	</manifest>
+	<spine>
+		<itemref idref="titlepage.xhtml"/>
+		<itemref idref="imprint.xhtml"/>
+		<itemref idref="preface.xhtml"/>
+		<itemref idref="halftitlepage.xhtml"/>
+		<itemref idref="a.xhtml"/>
+		<itemref idref="b.xhtml"/>
+		<itemref idref="c.xhtml"/>
+		<itemref idref="d.xhtml"/>
+		<itemref idref="e.xhtml"/>
+		<itemref idref="f.xhtml"/>
+		<itemref idref="g.xhtml"/>
+		<itemref idref="h.xhtml"/>
+		<itemref idref="i.xhtml"/>
+		<itemref idref="j.xhtml"/>
+		<itemref idref="k.xhtml"/>
+		<itemref idref="l.xhtml"/>
+		<itemref idref="m.xhtml"/>
+		<itemref idref="n.xhtml"/>
+		<itemref idref="o.xhtml"/>
+		<itemref idref="p.xhtml"/>
+		<itemref idref="q.xhtml"/>
+		<itemref idref="r.xhtml"/>
+		<itemref idref="s.xhtml"/>
+		<itemref idref="t.xhtml"/>
+		<itemref idref="u.xhtml"/>
+		<itemref idref="v.xhtml"/>
+		<itemref idref="w.xhtml"/>
+		<itemref idref="x.xhtml"/>
+		<itemref idref="y.xhtml"/>
+		<itemref idref="z.xhtml"/>
+		<itemref idref="colophon.xhtml"/>
+		<itemref idref="uncopyright.xhtml"/>
+	</spine>
+</package>
