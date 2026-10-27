@@ -70,11 +70,14 @@ order of decreasing item size and then by name (so each is naturally aligned), n
 | `trellis.gate` `trellis.up` `trellis.down` | U8 | [E·U·S] | unit u of expert e at byte (U·e + u)·S |
 | `shared.trellis.gate` `.up` `.down` | U8 | [U·S] | shared expert's units |
 
+A codebook other than mcg suffixes every one of these names, e.g. `trellis.gate.mul1`; see [Codebook](#codebook).
+
 | metadata | value |
 |---|---|
 | `layer`, `k`, `hessian`, `pad_halves`, `index_file` | |
 | `gate_up_order` | `grouped` |
 | `down_order` | `item128` |
+| `codebook` | required when the codebook is not mcg |
 
 ## experts/exlr8-layer-LLL.index.safetensors
 
@@ -99,7 +102,7 @@ order of decreasing item size and then by name (so each is naturally aligned), n
 | `experts` | routed range, `0-(E−1)` |
 | `widths`, `shared_widths` | stored K, comma list |
 | `trellis_files` | comma list |
-| `codebook` | `mcg 0xCBAC1FED`, E4M3 rounding |
+| `codebook` | codebook name, multiplier and `E4M3 rounding`, e.g. `mcg 0xCBAC1FED, E4M3 rounding` |
 | `rotation`, `sign_seed`, `sharding`, `checksum` | text forms of the tables below |
 | `hessian`, `hessian_rule`, `shrink` | calibration set and Hessian treatment |
 | `error_reference`, `error_inputs`, `max_heldout`, `min_heldout` | error-table provenance |
@@ -131,11 +134,32 @@ xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (g
 | step | operation |
 |---|---|
 | bits → states | int16 words in pairs, the two words of each pair swapped; bits MSB first; K bits per value, 256 values; state i = the 16 bits ending at value i, wrapping |
-| codebook | x = (state · 0xCBAC1FED) mod 2³²; x = (x & 0x8FFF8FFF) ^ 0x3B603B60; v = fp16(x & 0xFFFF) + fp16(x >> 16) |
+| codebook | the file's codebook, below |
 | rounding | v → E4M3 (nearest even, clamp ±448) → fp32 (required) |
 | placement | stream position j = 8t + i, t = 0..31, i = 0..7; r0 = 2(t mod 4), c0 = ⌊t/4⌋; (row, col) = [(r0,c0), (r0+1,c0), (r0+8,c0), (r0+9,c0), (r0,c0+8), (r0+1,c0+8), (r0+8,c0+8), (r0+9,c0+8)][i] |
 | rotation | Hb = block-diagonal Sylvester Hadamard, 128 × 128, scaled 1/√128 |
 | matrix | W = diag(suh) · Hb · T · Hb · diag(svh); HF weight = Wᵀ |
+
+## Codebook
+
+The hash from trellis state to value. Σb is the sum of the four bytes of x; both codebooks round the result to E4M3.
+
+| codebook | tensor name | state → v |
+|---|---|---|
+| mcg | `trellis.gate` | x = (state · 0xCBAC1FED) mod 2³²; x = (x & 0x8FFF8FFF) ^ 0x3B603B60; v = fp16(x & 0xFFFF) + fp16(x >> 16) |
+| mul1 | `trellis.gate.mul1` | x = (state · 0x83DCD12D) mod 2³²; v = fp16(1024 + Σb) · c + d, c = fp16 `0x1EEE`, d = fp16 `0xC931` |
+
+mul1's constants put v at (Σb − 510) · c; the fp16 operation order is part of the definition, since the result is
+rounded to E4M3.
+
+The tensor name selects the codebook. mcg is the unmarked default and keeps the bare tensor names; any other
+codebook suffixes them and sets `codebook` in the trellis file's metadata. Resolve each projection as
+`trellis.<proj>`, then `trellis.<proj>.<codebook>` for the codebooks you implement, and refuse the file if neither
+is present. The name carries it so that a reader cannot decode one codebook's codes with another's hash, which
+yields plausible wrong weights and no error.
+
+Each trellis file selects its own codebook, so the widths of one layer may use different codebooks. The index
+file's `codebook` records the encode it was written from and selects nothing.
 
 ## Sharding
 
