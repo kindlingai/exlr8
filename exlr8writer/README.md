@@ -139,3 +139,23 @@ It writes `tp<N>/k<K>/rank<r>.safetensors` and a SHA256 sidecar for each.
 `release_set_id` reads every weight file once; to skip that, pass a
 `{"set_id": ..., "index_sha256": {file name: sha256}}` mapping from another
 source, such as the hashes a Hugging Face file listing reports.
+
+## Native stores
+
+`write_native_layer` writes a checkpoint's own quantized expert bytes, unchanged, as a native store (FORMAT.md,
+"Native stores"): `mxfp4` for FP4 E2M1 with an E8M0 scale per 32 inputs, `fp8b32` for FP8 E4M3 with an E8M0 scale
+per 32 × 32 block. The sources return each projection's HF weight and scale as uint8:
+
+```python
+from exlr8writer import write_native_layer
+
+write_native_layer(
+    3, "build/experts",
+    hidden_size=5120, intermediate_size=2304, routed_experts=384,
+    routed=("mxfp4", lambda e, p: load_weight_and_scale(3, e, p)),
+    shared=("fp8b32", lambda p: load_shared_weight_and_scale(3, p)),
+    metadata={"model": "DeepseekV41ForCausalLM", "tensor_prefix": "layers.", ...},
+)
+```
+
+`write_index_slices(..., widths=("mxfp4", "fp8b32"))` then writes `tp<N>/<store>/rank<r>.safetensors`.
