@@ -118,7 +118,8 @@ class _SafetensorsWriter:
                 offset += gap
                 pad_number += 1
             nbytes = int(np.prod(shape, dtype=np.int64)) * np.dtype({
-                "U8": "u1", "I8": "i1", "I16": "<i2", "F16": "<f2", "I32": "<i4", "I64": "<i8", "U64": "<u8", "F32": "<f4",
+                "U8": "u1", "I8": "i1", "I16": "<i2", "F16": "<f2", "BF16": "<u2", "I32": "<i4", "I64": "<i8",
+                "U64": "<u8", "F32": "<f4", "F8_E4M3": "u1", "F8_E8M0": "u1",
             }[dtype]).itemsize
             header[name] = {"dtype": dtype, "shape": list(shape), "data_offsets": [offset, offset + nbytes]}
             self.layout.append((name, offset, nbytes))
