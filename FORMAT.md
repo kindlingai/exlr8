@@ -149,13 +149,15 @@ xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (g
 
 ## Codebook
 
-The hash from trellis state to value. Σb is the sum of the four bytes of x; both codebooks round the result to E4M3.
+The hash from trellis state to value. Σb is the sum of the four bytes of x; every codebook rounds the result to E4M3.
 
 | codebook | tensor name | state → v |
 |---|---|---|
 | mcg | `trellis.gate` | x = (state · 0xCBAC1FED) mod 2³²; x = (x & 0x8FFF8FFF) ^ 0x3B603B60; v = fp16(x & 0xFFFF) + fp16(x >> 16) |
 | mul1 | `trellis.gate.mul1` | x = (state · 0x83DCD12D) mod 2³²; v = fp16(1024 + Σb) · c + d, c = fp16 `0x1EEE`, d = fp16 `0xC931` |
+| pmcgx | `trellis.gate.pmcgx` | values 2p and 2p + 1 share one 20-bit state w, the 20 bits ending at value 2p + 1, wrapping; x₁ = (w · 0xCBAC1FED) mod 2³², x₂ = (w · 0xBCA14C51) mod 2³², each masked as mcg's x; v₂ₚ = fp16(x₁ & 0xFFFF) + fp16(x₂ >> 16), v₂ₚ₊₁ = fp16(x₁ >> 16) + fp16(x₂ & 0xFFFF) |
 
+pmcgx keeps K bits per value: each 20-bit state takes 2K new bits. Its `codebook` metadata names both multipliers.
 mul1's constants put v at (Σb − 510) · c; the fp16 operation order is part of the definition, since the result is
 rounded to E4M3.
 
