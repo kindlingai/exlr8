@@ -18,10 +18,10 @@ import xxhash
 
 ALIGN = 1 << 16
 PROJECTIONS = ("gate", "up", "down")
-# Trellis codebooks, by the name a ``codebook`` string starts with, and the multiplier it must also give. mcg is
-# the unmarked default; any other codebook suffixes the trellis tensor names, so a reader that does not implement
-# it fails to find the tensor rather than decoding with the wrong hash.
-CODEBOOKS = {"mcg": "0xCBAC1FED", "mul1": "0x83DCD12D"}
+# Trellis codebooks, by the name a ``codebook`` string starts with, and the multipliers it must also give (pmcgx,
+# the pair trellis, has two). mcg is the unmarked default; any other codebook suffixes the trellis tensor names, so
+# a reader that does not implement it fails to find the tensor rather than decoding with the wrong hash.
+CODEBOOKS = {"mcg": ("0xCBAC1FED",), "mul1": ("0x83DCD12D",), "pmcgx": ("0xCBAC1FED", "0xBCA14C51")}
 SIDES = {
     "gate": ("svh", "su_block"),
     "up": ("svh", "su_block"),
@@ -221,14 +221,14 @@ def _checksum(trellis: bytes, intermediate: np.ndarray, hidden_blocks: np.ndarra
 
 def _codebook_name(codebook: str) -> str:
     """The codebook a ``codebook`` metadata string names: its first word, which must be known and must agree with
-    the multiplier the rest of the string gives.
+    the multipliers the rest of the string gives.
 
     Raises ValueError for anything else.
     """
     name = codebook.split(" ", 1)[0]
-    multiplier = CODEBOOKS.get(name)
-    if not multiplier or multiplier.lower() not in codebook.lower():
-        raise ValueError(f"codebook {codebook!r} is not one of {sorted(CODEBOOKS)} with its multiplier")
+    multipliers = CODEBOOKS.get(name)
+    if not multipliers or any(m.lower() not in codebook.lower() for m in multipliers):
+        raise ValueError(f"codebook {codebook!r} is not one of {sorted(CODEBOOKS)} with its multipliers")
     return name
 
 
