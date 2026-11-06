@@ -33,6 +33,16 @@ The provider based Python fileset writer is in [`exlr8writer/`](exlr8writer/). I
 
 ---
 
+## Releases, and the engine that serves them
+
+| release on Hugging Face | model |
+|---|---|
+| [kindlingai/glm-5.3-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4) | GLM-5.3 |
+| [kindlingai/glm-5.3-flash-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-flash-exlr8-k2-k3-k4) | GLM-5.3-Flash |
+| [kindlingai/deepseek-v4.1-flash-exlr8-native](https://huggingface.co/kindlingai/deepseek-v4.1-flash-exlr8-native) | DeepSeek-V4.1-Flash: the official weights, byte for byte, in the exlr8 file layout |
+
+[gr8](https://github.com/kindlingai/gr8) serves all three on DGX Spark (GB10) boxes.
+
 ## The math, for beginners
 
 GLM-5.3 is a mixture-of-experts model. Most of its weights sit in the routed experts: each of the 78 main layers
