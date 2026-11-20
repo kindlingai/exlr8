@@ -8,7 +8,7 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 |---|---|---|
 | v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
 | v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
-| v4 | widths K0.5-K5 with pmcgx half widths, mixed codebooks, manifest `requires` | `exlr8-v4` |
+| v4 | widths K0.5-K6 with pmcgx half widths, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires` | `exlr8-v4` |
 
 A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
 features are a subset; a v2 reader refuses v4 files by their `format`.
@@ -21,12 +21,12 @@ features are a subset; a v2 reader refuses v4 files by their `format`.
 | I | routed expert intermediate size | `PkK.gate.svh` width; metadata `moe_intermediate_size` | 2048 |
 | U | units per expert, I / 128 | | 16 |
 | E | routed experts in a layer | `kK.index` rows; metadata `experts` | 256 |
-| K | trellis bits per weight: 1 to 5, or a half-integer 0.5 to 4.5 for a [pair codebook](#widths) | `widths`, `shared_widths` | 2, 3, 4 |
+| K | trellis bits per weight: 1 to 5 (6 for an `-f16` codebook), or a half-integer from 0.5 for a [pair codebook](#widths) | `widths`, `shared_widths` | 2, 3, 4 |
 | kK | width name: `k` + K, with `p5` for the half (`k4p5` is K = 4.5, `k0p5` is K = 0.5) | | `k2` `k3` `k4` |
 | store | where a unit's bytes live: `kK` for trellis width K, or a [native store](#native-stores) name | | `k2` `k3` `k4` |
 | L | layer id | file name, metadata `layer` | 0-78 |
 | unit u | intermediate channels 128u..128u+127 of one expert (`half` in metadata names) | | |
-| B | bytes per unit at width K = H·16·K | | K0.5 49,152 · K1 98,304 · K2 196,608 · K3 294,912 · K4 393,216 · K4.5 442,368 · K5 491,520 |
+| B | bytes per unit at width K = H·16·K | | K0.5 49,152 · K1 98,304 · K2 196,608 · K3 294,912 · K4 393,216 · K4.5 442,368 · K5 491,520 · K6 589,824 |
 | S | stride between units: B, or ⌈B / 65,536⌉·65,536 if `pad_halves` | | B |
 
 H and I are multiples of 128; the shared expert has intermediate size I. Layers 0..`first_moe_layer`−1 are dense MLP; layers ≥ `num_hidden_layers` are MTP layers.
@@ -75,7 +75,7 @@ hashes/<path>.sha256                           "<sha256> <bytes>"; expert files 
 | tensor offsets | multiples of 65,536 |
 | gaps | `__pad.N` uint8 zeros |
 | `__metadata__.format` | `exlr8-v4` (`exlr8-v4-index-slice` for index slices) |
-| `__metadata__.scheme` | `exlr8-e4m3-v4`; `exlr8-native-v4` in a release with no trellis data |
+| `__metadata__.scheme` | `exlr8-trellis-v4`; `exlr8-native-v4` in a release with no trellis data. Rounding belongs to each [codebook](#codebook) |
 
 Index slices are the exception: they are packed, with the header padded with spaces to a multiple of 8, tensors in
 order of decreasing item size and then by name (so each is naturally aligned), no `__pad.N` and no `scheme`.
@@ -159,16 +159,17 @@ xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (g
 | step | operation |
 |---|---|
 | bits → stream | int16 words in pairs, the two words of each pair swapped; bits MSB first; 256·K bits, read as a ring (wrapping) |
-| stream → states | mcg, mul1: K bits per value; state i = the 16 bits ending at bit K(i + 1). pmcgx: see [Codebook](#codebook) |
+| stream → states | mcg, mul1 (and their `-f16` forms): K bits per value; state i = the 16 bits ending at bit K(i + 1). pmcgx: see [Codebook](#codebook) |
 | codebook | the file's codebook, below, or in a mixed file the expert's |
-| rounding | v → E4M3 (nearest even, clamp ±448) → fp32 (required) |
+| rounding | E4M3 codebooks: v → E4M3 (nearest even, clamp ±448) → fp32 (required). `-f16` codebooks: none, v is the fp16 value |
 | placement | stream position j = 8t + i, t = 0..31, i = 0..7; r0 = 2(t mod 4), c0 = ⌊t/4⌋; (row, col) = [(r0,c0), (r0+1,c0), (r0+8,c0), (r0+9,c0), (r0,c0+8), (r0+1,c0+8), (r0+8,c0+8), (r0+9,c0+8)][i] |
 | rotation | Hb = block-diagonal Sylvester Hadamard, 128 × 128, scaled 1/√128 |
 | matrix | W = diag(suh) · Hb · T · Hb · diag(svh); HF weight = Wᵀ |
 
 ## Codebook
 
-The hash from trellis state to value. Σb is the sum of the four bytes of x; every codebook rounds the result to E4M3.
+The hash from trellis state to value. Σb is the sum of the four bytes of x. Each codebook below rounds the result to
+E4M3; its `-f16` form, under [fp16 codebooks](#fp16-codebooks), keeps the fp16 value.
 
 | codebook | tensor name | state → v |
 |---|---|---|
@@ -179,7 +180,7 @@ The hash from trellis state to value. Σb is the sum of the four bytes of x; eve
 pmcgx keeps K bits per value: each 20-bit state takes 2K new bits, so K may be a half-integer. Its `codebook`
 metadata names both multipliers.
 mul1's constants put v at (Σb − 510) · c; the fp16 operation order is part of the definition, since the result is
-rounded to E4M3.
+rounded to E4M3 (or, in mul1-f16, used as is).
 
 The tensor name selects the codebook. mcg is the unmarked default and keeps the bare tensor names; any other
 codebook suffixes them and sets `codebook` in the trellis file's metadata. Resolve each projection as
@@ -195,12 +196,35 @@ file's `codebook` records the encode it was written from and selects nothing.
 | codebook | K |
 |---|---|
 | mcg, mul1 | 1, 2, 3, 4, 5 |
+| mcg-f16, mul1-f16 | 1, 2, 3, 4, 5, 6 |
 | pmcgx (a pair codebook: 2K new bits per state) | 0.5 to 5 in steps of 0.5 (2K = 1 … 10) |
+| pmcgx-f16 | 0.5 to 6 in steps of 0.5 (2K = 1 … 12) |
 
 A tile is 32·K bytes at every width (16 at K0.5, 144 at K4.5), so its 16·K words still come in pairs. Refuse a
-half-integer K with mcg or mul1. The E4M3 rounding caps quality near K5: on GLM-5.3 experts it raised the
-Hessian-weighted error 2% at K4.5, 12% at K5 and 2.3x at K6, against the same encode without it, which is why the
-widths stop at K5. K0.5 is meant for rarely routed experts.
+half-integer K with a codebook that is not a pair codebook, and K6 with an E4M3 codebook. The E4M3 rounding caps
+quality near K5: on GLM-5.3 experts it raised the Hessian-weighted error 2% at K4.5, 12% at K5 and 2.3x at K6,
+against the same encode without it, which is why the E4M3 widths stop at K5. K0.5 is meant for rarely routed
+experts.
+
+### fp16 codebooks
+
+`mcg-f16`, `mul1-f16` and `pmcgx-f16` hash exactly as mcg, mul1 and pmcgx, and skip the E4M3 rounding: the decoded
+value is the fp16 v, and the encoder searched with those values. They suit an engine that computes in fp16 or bf16.
+An fp16 engine reproduces the encoder's weights exactly. A bf16 engine rounds v a second time (bf16 keeps 8
+significant bits, v up to 11); that error is near 2^-8 relative, far below K6's, and the format leaves it to the
+engine.
+
+| codebook | tensor name | `codebook` metadata, e.g. |
+|---|---|---|
+| mcg-f16 | `trellis.gate.mcg-f16` | `mcg-f16 0xCBAC1FED, fp16` |
+| mul1-f16 | `trellis.gate.mul1-f16` | `mul1-f16 0x83DCD12D, fp16` |
+| pmcgx-f16 | `trellis.gate.pmcgx-f16` | `pmcgx-f16 V2 L20 0xCBAC1FED 0xBCA14C51, fp16` |
+
+The suffix keeps an E4M3 reader from decoding them as their rounded forms. An engine that computes in FP8 can serve
+an `-f16` codebook only by rounding its values on load, which loses more than an E4M3 encode of the same width, since
+the search never saw the rounded values. It refuses `-f16` codebooks unless its operator asks for that trade. A
+release may use `-f16` codebooks at the widths where they pay off (K4.5 and above) and E4M3 codebooks below, since
+each width file selects its own codebook.
 
 ### Mixed codebooks
 
@@ -220,7 +244,7 @@ tail-biting and stand alone, so no state crosses from one expert to the next.
 | `codebooks` | the codebook of each id, in id order, `; ` between them, each as a single-codebook file's `codebook`, e.g. `mcg 0xCBAC1FED, E4M3 rounding; pmcgx V2 L20 0xCBAC1FED 0xBCA14C51, E4M3 rounding` |
 
 Refuse the file if an id has no entry in `codebooks`, or if an expert's id names a codebook you do not implement.
-At a half-integer K every entry must be a pair codebook. The id joins the [expert checksum](#expert-checksum), so a
+At a half-integer K every entry must be a pair codebook, and at K6 an `-f16` codebook. The id joins the [expert checksum](#expert-checksum), so a
 unit checked against its checksum is checked against its codebook too.
 
 ## Native stores
