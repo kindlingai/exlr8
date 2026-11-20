@@ -10,11 +10,12 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 | I | routed expert intermediate size | `PkK.gate.svh` width; metadata `moe_intermediate_size` | 2048 |
 | U | units per expert, I / 128 | | 16 |
 | E | routed experts in a layer | `kK.index` rows; metadata `experts` | 256 |
-| K | trellis bits per weight | `widths`, `shared_widths` | 2, 3, 4 |
+| K | trellis bits per weight: 1 to 6, or a half-integer 1.5 to 5.5 for a [pair codebook](#widths) | `widths`, `shared_widths` | 2, 3, 4 |
+| kK | width name: `k` + K, with `p5` for the half (`k4p5` is K = 4.5) | | `k2` `k3` `k4` |
 | store | where a unit's bytes live: `kK` for trellis width K, or a [native store](#native-stores) name | | `k2` `k3` `k4` |
 | L | layer id | file name, metadata `layer` | 0-78 |
 | unit u | intermediate channels 128u..128u+127 of one expert (`half` in metadata names) | | |
-| B | bytes per unit at width K = H·16·K | | K2 196,608 · K3 294,912 · K4 393,216 |
+| B | bytes per unit at width K = H·16·K | | K1 98,304 · K2 196,608 · K3 294,912 · K4 393,216 · K4.5 442,368 · K5 491,520 · K6 589,824 |
 | S | stride between units: B, or ⌈B / 65,536⌉·65,536 if `pad_halves` | | B |
 
 H and I are multiples of 128; the shared expert has intermediate size I. Layers 0..`first_moe_layer`−1 are dense MLP; layers ≥ `num_hidden_layers` are MTP layers.
@@ -47,7 +48,7 @@ dense/exlr8-vocab.safetensors                  embed_tokens, lm_head, final norm
 dense/exlr8-extra-NAME.safetensors             tensors outside the decoder layers (vision tower, ...)
 dense/exlr8-split-NAME.pPPP.safetensors        row ranges of one matrix too large for one file
 experts/exlr8-layer-LLL.index.safetensors      MoE layers: offsets, side data, checksums, error tables
-experts/exlr8-layer-LLL.kK.safetensors         MoE layers: trellis bytes, one file per stored K
+experts/exlr8-layer-LLL.kK.safetensors         MoE layers: trellis bytes, one file per stored K (width name)
 experts/exlr8-layer-LLL.STORE.safetensors      MoE layers: native store bytes, one file per native store
 manifests/exlr8-manifest-NAME.json             width per unit
 index-slices/tpN/STORE/rankR.safetensors       one rank's share of every index file, per store (kK or native)
@@ -76,17 +77,22 @@ order of decreasing item size and then by name (so each is naturally aligned), n
 | `shared.trellis.gate` `.up` `.down` | U8 | [U·S] | shared expert's units |
 
 A codebook other than mcg suffixes every one of these names, e.g. `trellis.gate.mul1`; see [Codebook](#codebook).
+A file whose experts use different codebooks suffixes them `.mix` and adds a codebook table; see
+[Mixed codebooks](#mixed-codebooks).
 
 | metadata | value |
 |---|---|
-| `layer`, `k`, `hessian`, `pad_halves`, `index_file` | |
+| `layer`, `hessian`, `pad_halves`, `index_file` | |
+| `k` | K as a decimal, e.g. `4` or `4.5` |
 | `gate_up_order` | `grouped` |
 | `down_order` | `item128` |
-| `codebook` | required when the codebook is not mcg |
+| `codebook` | required when the codebook is not mcg; `mix` in a mixed file |
+| `codebooks` | mixed files only: the codebook of each id |
 
 ## experts/exlr8-layer-LLL.index.safetensors
 
-`P` = `` (routed, E' = E) or `shared.` (E' = 1). One `PkK.` block per stored width. A native store's block is in
+`P` = `` (routed, E' = E) or `shared.` (E' = 1). One `PkK.` block per stored width, named by the width name
+(`k4p5.index`). A native store's block is in
 [Native stores](#native-stores). `signs.in` and `signs.out` are present when the layer stores a trellis width.
 
 | tensor | dtype | shape | contents |
@@ -125,7 +131,8 @@ A codebook other than mcg suffixes every one of these names, e.g. `trellis.gate.
 ### Expert checksum
 
 xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (gate/up `svh[128u:128u+128]`, down
-`suh[128u:128u+128]`, F16) ‖ the projection's H/128 block scales (F16).
+`suh[128u:128u+128]`, F16) ‖ the projection's H/128 block scales (F16). In a mixed file, the expert's codebook id
+(one byte) follows.
 
 ## Tiles
 
@@ -140,8 +147,9 @@ xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (g
 
 | step | operation |
 |---|---|
-| bits → states | int16 words in pairs, the two words of each pair swapped; bits MSB first; K bits per value, 256 values; state i = the 16 bits ending at value i, wrapping |
-| codebook | the file's codebook, below |
+| bits → stream | int16 words in pairs, the two words of each pair swapped; bits MSB first; 256·K bits, read as a ring (wrapping) |
+| stream → states | mcg, mul1: K bits per value; state i = the 16 bits ending at bit K(i + 1). pmcgx: see [Codebook](#codebook) |
+| codebook | the file's codebook, below, or in a mixed file the expert's |
 | rounding | v → E4M3 (nearest even, clamp ±448) → fp32 (required) |
 | placement | stream position j = 8t + i, t = 0..31, i = 0..7; r0 = 2(t mod 4), c0 = ⌊t/4⌋; (row, col) = [(r0,c0), (r0+1,c0), (r0+8,c0), (r0+9,c0), (r0,c0+8), (r0+1,c0+8), (r0+8,c0+8), (r0+9,c0+8)][i] |
 | rotation | Hb = block-diagonal Sylvester Hadamard, 128 × 128, scaled 1/√128 |
@@ -155,9 +163,10 @@ The hash from trellis state to value. Σb is the sum of the four bytes of x; eve
 |---|---|---|
 | mcg | `trellis.gate` | x = (state · 0xCBAC1FED) mod 2³²; x = (x & 0x8FFF8FFF) ^ 0x3B603B60; v = fp16(x & 0xFFFF) + fp16(x >> 16) |
 | mul1 | `trellis.gate.mul1` | x = (state · 0x83DCD12D) mod 2³²; v = fp16(1024 + Σb) · c + d, c = fp16 `0x1EEE`, d = fp16 `0xC931` |
-| pmcgx | `trellis.gate.pmcgx` | values 2p and 2p + 1 share one 20-bit state w, the 20 bits ending at value 2p + 1, wrapping; x₁ = (w · 0xCBAC1FED) mod 2³², x₂ = (w · 0xBCA14C51) mod 2³², each masked as mcg's x; v₂ₚ = fp16(x₁ & 0xFFFF) + fp16(x₂ >> 16), v₂ₚ₊₁ = fp16(x₁ >> 16) + fp16(x₂ & 0xFFFF) |
+| pmcgx | `trellis.gate.pmcgx` | values 2p and 2p + 1 share one 20-bit state w, the 20 bits ending at bit 2K(p + 1), wrapping; x₁ = (w · 0xCBAC1FED) mod 2³², x₂ = (w · 0xBCA14C51) mod 2³², each masked as mcg's x; v₂ₚ = fp16(x₁ & 0xFFFF) + fp16(x₂ >> 16), v₂ₚ₊₁ = fp16(x₁ >> 16) + fp16(x₂ & 0xFFFF) |
 
-pmcgx keeps K bits per value: each 20-bit state takes 2K new bits. Its `codebook` metadata names both multipliers.
+pmcgx keeps K bits per value: each 20-bit state takes 2K new bits, so K may be a half-integer. Its `codebook`
+metadata names both multipliers.
 mul1's constants put v at (Σb − 510) · c; the fp16 operation order is part of the definition, since the result is
 rounded to E4M3.
 
@@ -169,6 +178,39 @@ yields plausible wrong weights and no error.
 
 Each trellis file selects its own codebook, so the widths of one layer may use different codebooks. The index
 file's `codebook` records the encode it was written from and selects nothing.
+
+### Widths
+
+| codebook | K |
+|---|---|
+| mcg, mul1 | 1, 2, 3, 4, 5, 6 |
+| pmcgx (a pair codebook: 2K new bits per state) | 1 to 6 in steps of 0.5 (2K = 2 … 12) |
+
+A tile is 32·K bytes at every width, 144 at K4.5, so its 16·K words still come in pairs. Refuse a half-integer K
+with mcg or mul1. The E4M3 rounding caps quality near K5: on GLM-5.3 experts it raised the Hessian-weighted error
+2% at K4.5, 12% at K5 and 2.3x at K6, against the same encode without it. K6 therefore gains about 1.8x over K5,
+where each bit up to K5 gains 3.4x or more.
+
+### Mixed codebooks
+
+A trellis file may give each expert its own codebook. Its trellis tensors then take the suffix `.mix`
+(`trellis.gate.mix`, `shared.trellis.down.mix`), every one of them, so a reader without mixed support finds no
+name it knows and refuses the file. Units keep the layout above; only the hash differs between experts. Tiles are
+tail-biting and stand alone, so no state crosses from one expert to the next.
+
+| tensor | dtype | shape | contents |
+|---|---|---|---|
+| `trellis.codebook` | U8 | [E] | codebook id of each routed expert, for all three projections |
+| `shared.trellis.codebook` | U8 | [1] | codebook id of the shared expert, when the file has it |
+
+| metadata | value |
+|---|---|
+| `codebook` | `mix` |
+| `codebooks` | the codebook of each id, in id order, `; ` between them, each as a single-codebook file's `codebook`, e.g. `mcg 0xCBAC1FED, E4M3 rounding; pmcgx V2 L20 0xCBAC1FED 0xBCA14C51, E4M3 rounding` |
+
+Refuse the file if an id has no entry in `codebooks`, or if an expert's id names a codebook you do not implement.
+At a half-integer K every entry must be a pair codebook. The id joins the [expert checksum](#expert-checksum), so a
+unit checked against its checksum is checked against its codebook too.
 
 ## Native stores
 
@@ -306,8 +348,24 @@ are vectors, stored as-is. The vision tower and aligner are `exlr8-extra-vision`
 | `layers["L"].gate`, `.up` | [E][U] widths per (expert, unit) |
 | `layers["L"].down` | [E] widths, one per expert |
 | `layers["L"].shared` | `{"gate": [U], "up": [U], "down": K}` |
+| `requires` | what an engine needs to serve the manifest, below |
 
-A width is K, or a native store's name.
+A width is K (a JSON number: `4`, `4.5`), or a native store's name.
+
+### requires
+
+The union over every unit the manifest selects, so an engine can refuse a manifest from this one object, before it
+opens an expert file. The files stay authoritative: an engine still resolves each file's tensor names and checks
+each unit as above.
+
+| key | value |
+|---|---|
+| `requires.trellis` | sorted list of `"<width name> <codebook>"`, one per (width, codebook) any selected unit uses, e.g. `["k2 mul1", "k4 mul1", "k4p5 pmcgx"]`; experts of a mixed file count under their own codebooks |
+| `requires.stores` | sorted list of the native stores any selected unit uses (`[]`: none) |
+| `requires.mixing` | `none`: each layer's selected units use one codebook; `width`: some layer's widths use different codebooks, each width one; `expert`: some layer has a mixed file with more than one codebook among its selected experts |
+
+Refuse the manifest if `requires` names a width, codebook, store or mixing level the engine does not serve. A
+manifest without `requires` predates it: the engine learns the same from the files, layer by layer.
 
 GLM-5.3 names: `bit225` `bit243` `bit260` `bit325` `bit338` (≈ 2.25 … 3.38 routed bits/weight, KL-optimised),
 `down1` / `home` / `up1` (≈ 2.25 / 3.25 / 4.0).
@@ -317,7 +375,7 @@ GLM-5.3 names: `bit225` `bit243` `bit260` `bit325` `bit338` (≈ 2.25 … 3.38 r
 All units rank R owns at TP = N, width K; one tensor set per MoE layer `Lnnn` (e.g. `L040`); n = units owned.
 A native store's slices are `index-slices/tpN/<store>/rankR.safetensors`. They hold `Lnnn.units`, `Lnnn.offset`
 (into the store file) and `Lnnn.checksum` only, and their metadata gives `store` and `unit_bytes` in place of `k` and
-`half_bytes`.
+`half_bytes`. The directory takes the width name, e.g. `index-slices/tp4/k4p5/`.
 
 | tensor | dtype | shape | contents |
 |---|---|---|---|
@@ -327,12 +385,14 @@ A native store's slices are `index-slices/tpN/<store>/rankR.safetensors`. They h
 | `Lnnn.chan` | F16 | [n, 3, 128] | the unit's channel values (gate/up `svh`, down `suh`) |
 | `Lnnn.block` | F16 | [E+1, 3, H/128] | block scales (gate/up `su_block`, down `sv_block`) |
 | `Lnnn.signs` | I8 | [2, H] | `signs.in`, `signs.out` |
+| `Lnnn.codebook` | U8 | [n] | the unit's codebook id; layers whose width file is mixed only |
 
 | metadata | contents |
 |---|---|
 | `tp`, `rank`, `k`, `layers`, `half_bytes`, `rule`, `files` | slice identity |
 | `hidden_size`, `n_routed_experts`, and the other model metadata keys | as in the index files; absent for GLM-5.3 |
 | `layer_experts` | JSON {layer: E} for layers whose E differs from `n_routed_experts` (absent: none) |
+| `codebooks` | JSON {layer: the width file's `codebook`, or its `codebooks` for a mixed file}, every layer |
 | `set_id` | sha256 of lines `"<path> <bytes> <sha256>\n"` over `experts/*` and `dense/*`, sorted by path |
 | `index_sha256` | JSON {layer: sha256 of its index file} |
 | `source` | release name and version |
