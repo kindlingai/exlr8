@@ -1,6 +1,17 @@
-# exlr8 v2 file format
+# exlr8 v4 file format
 
 Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
+
+## Versions
+
+| version | adds | format strings |
+|---|---|---|
+| v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
+| v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
+| v4 | widths K0.5-K5 with pmcgx half widths, mixed codebooks, manifest `requires` | `exlr8-v4` |
+
+A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
+features are a subset; a v2 reader refuses v4 files by their `format`.
 
 ## Symbols
 
@@ -10,12 +21,12 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 | I | routed expert intermediate size | `PkK.gate.svh` width; metadata `moe_intermediate_size` | 2048 |
 | U | units per expert, I / 128 | | 16 |
 | E | routed experts in a layer | `kK.index` rows; metadata `experts` | 256 |
-| K | trellis bits per weight: 1 to 6, or a half-integer 1.5 to 5.5 for a [pair codebook](#widths) | `widths`, `shared_widths` | 2, 3, 4 |
-| kK | width name: `k` + K, with `p5` for the half (`k4p5` is K = 4.5) | | `k2` `k3` `k4` |
+| K | trellis bits per weight: 1 to 5, or a half-integer 0.5 to 4.5 for a [pair codebook](#widths) | `widths`, `shared_widths` | 2, 3, 4 |
+| kK | width name: `k` + K, with `p5` for the half (`k4p5` is K = 4.5, `k0p5` is K = 0.5) | | `k2` `k3` `k4` |
 | store | where a unit's bytes live: `kK` for trellis width K, or a [native store](#native-stores) name | | `k2` `k3` `k4` |
 | L | layer id | file name, metadata `layer` | 0-78 |
 | unit u | intermediate channels 128u..128u+127 of one expert (`half` in metadata names) | | |
-| B | bytes per unit at width K = H·16·K | | K1 98,304 · K2 196,608 · K3 294,912 · K4 393,216 · K4.5 442,368 · K5 491,520 · K6 589,824 |
+| B | bytes per unit at width K = H·16·K | | K0.5 49,152 · K1 98,304 · K2 196,608 · K3 294,912 · K4 393,216 · K4.5 442,368 · K5 491,520 |
 | S | stride between units: B, or ⌈B / 65,536⌉·65,536 if `pad_halves` | | B |
 
 H and I are multiples of 128; the shared expert has intermediate size I. Layers 0..`first_moe_layer`−1 are dense MLP; layers ≥ `num_hidden_layers` are MTP layers.
@@ -63,8 +74,8 @@ hashes/<path>.sha256                           "<sha256> <bytes>"; expert files 
 | data start | 65,536 (header padded with spaces) |
 | tensor offsets | multiples of 65,536 |
 | gaps | `__pad.N` uint8 zeros |
-| `__metadata__.format` | `exlr8-v2` (`exlr8-v2-index-slice` for index slices) |
-| `__metadata__.scheme` | `exlr8-e4m3-v2`; `exlr8-native-v2` in a release with no trellis data |
+| `__metadata__.format` | `exlr8-v4` (`exlr8-v4-index-slice` for index slices) |
+| `__metadata__.scheme` | `exlr8-e4m3-v4`; `exlr8-native-v4` in a release with no trellis data |
 
 Index slices are the exception: they are packed, with the header padded with spaces to a multiple of 8, tensors in
 order of decreasing item size and then by name (so each is naturally aligned), no `__pad.N` and no `scheme`.
@@ -183,13 +194,13 @@ file's `codebook` records the encode it was written from and selects nothing.
 
 | codebook | K |
 |---|---|
-| mcg, mul1 | 1, 2, 3, 4, 5, 6 |
-| pmcgx (a pair codebook: 2K new bits per state) | 1 to 6 in steps of 0.5 (2K = 2 … 12) |
+| mcg, mul1 | 1, 2, 3, 4, 5 |
+| pmcgx (a pair codebook: 2K new bits per state) | 0.5 to 5 in steps of 0.5 (2K = 1 … 10) |
 
-A tile is 32·K bytes at every width, 144 at K4.5, so its 16·K words still come in pairs. Refuse a half-integer K
-with mcg or mul1. The E4M3 rounding caps quality near K5: on GLM-5.3 experts it raised the Hessian-weighted error
-2% at K4.5, 12% at K5 and 2.3x at K6, against the same encode without it. K6 therefore gains about 1.8x over K5,
-where each bit up to K5 gains 3.4x or more.
+A tile is 32·K bytes at every width (16 at K0.5, 144 at K4.5), so its 16·K words still come in pairs. Refuse a
+half-integer K with mcg or mul1. The E4M3 rounding caps quality near K5: on GLM-5.3 experts it raised the
+Hessian-weighted error 2% at K4.5, 12% at K5 and 2.3x at K6, against the same encode without it, which is why the
+widths stop at K5. K0.5 is meant for rarely routed experts.
 
 ### Mixed codebooks
 
@@ -343,7 +354,7 @@ are vectors, stored as-is. The vision tower and aligner are `exlr8-extra-vision`
 
 | key | value |
 |---|---|
-| `format` | `exlr8-v2-manifest` |
+| `format` | `exlr8-v4-manifest` |
 | `name`, `version`, `set_id`, `rule`, `mtp_layer`, `source`, `changelog` | strings / list |
 | `layers["L"].gate`, `.up` | [E][U] widths per (expert, unit) |
 | `layers["L"].down` | [E] widths, one per expert |
@@ -364,8 +375,9 @@ each unit as above.
 | `requires.stores` | sorted list of the native stores any selected unit uses (`[]`: none) |
 | `requires.mixing` | `none`: each layer's selected units use one codebook; `width`: some layer's widths use different codebooks, each width one; `expert`: some layer has a mixed file with more than one codebook among its selected experts |
 
-Refuse the manifest if `requires` names a width, codebook, store or mixing level the engine does not serve. A
-manifest without `requires` predates it: the engine learns the same from the files, layer by layer.
+Refuse the manifest if `requires` names a width, codebook, store or mixing level the engine does not serve. Every
+v4 manifest carries `requires`; an `exlr8-v2-manifest` has none, and the engine learns the same from the files,
+layer by layer.
 
 GLM-5.3 names: `bit225` `bit243` `bit260` `bit325` `bit338` (≈ 2.25 … 3.38 routed bits/weight, KL-optimised),
 `down1` / `home` / `up1` (≈ 2.25 / 3.25 / 4.0).
