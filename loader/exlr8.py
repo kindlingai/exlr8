@@ -452,10 +452,14 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
     t = {k: v.to(device) for k, v in t.items()}
     if fmt == ROWS:         # tile t of row r: values 256t.. in stream order, rotated along the row only
         check_width(K, cb)
-        n = t["rows"].shape[0] * inp // 256
-        v = decode_tiles(t["rows"].reshape(n, int(32 * K)), K, cb).view(n, 256)[:, tile_perm().to(device)]
-        v = (v.reshape(-1, 128) @ hadamard(128, device)).view(out, inp)
-        return v * t["suh"].float().unsqueeze(0) * t["svh"].float().unsqueeze(1)
+        w, perm, had = torch.empty(out, inp, device=device), tile_perm().to(device), hadamard(128, device)
+        suh, svh = t["suh"].float().unsqueeze(0), t["svh"].float().unsqueeze(1)
+        for r in range(0, out, 4096):    # bounds decode_tiles' scratch, tens of bytes a value
+            rows = t["rows"][r:r + 4096]
+            n = rows.shape[0] * inp // 256
+            v = decode_tiles(rows.reshape(n, int(32 * K)), K, cb).view(n, 256)[:, perm]
+            w[r:r + rows.shape[0]] = (v.reshape(-1, 128) @ had).view(-1, inp) * suh * svh[r:r + rows.shape[0]]
+        return w
     if fmt == TRELLIS:
         check_width(K, cb)
         ent = t["trellis"]
