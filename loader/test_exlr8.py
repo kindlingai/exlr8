@@ -320,3 +320,25 @@ def test_dense_widths_refused(tmp_path, dense, meta):
     dense_file(str(tmp_path), meta)
     with pytest.raises(ValueError):
         x.load_layer(str(tmp_path), {"layers": {}, "dense": {"0": dense}}, 0)
+
+
+@pytest.mark.parametrize("K", [4, 4.5])
+def test_row_trellis(tmp_path, K):
+    """Each row's tiles decode in stream order and rotate along the row alone (FORMAT.md "Row trellis")."""
+    out, inp = 130, 512                # rows need not fill a 128-row block
+    g = torch.Generator().manual_seed(9)
+    codes = torch.randint(0, 256, (out, inp // 256 * int(32 * K)), dtype=torch.uint8, generator=g)
+    suh, svh = torch.randn(inp, generator=g).half(), torch.randn(out, generator=g).half()
+    sums = [x.xxh64(codes[128 * b:128 * b + 128], svh[128 * b:128 * b + 128], suh) for b in range(2)]
+    t = {"ple.record": torch.tensor([x.ROWS, out, inp, K if K == int(K) else -int(2 * K), 1, 1, 0, 0]),
+         "ple.checksum": ("U64", torch.tensor([c - 2 ** 64 if c >= 2 ** 63 else c for c in sums])),
+         "ple.rows.pmcgx": codes, "ple.suh": suh, "ple.svh": svh}
+    os.makedirs(tmp_path / "dense")
+    write_st(str(tmp_path / "dense" / "exlr8-extra-ple.safetensors"), t, {"format": "exlr8-v4", "codebooks": PMCGX_TEXT})
+    f = x.SafeFile(str(tmp_path / "dense" / "exlr8-extra-ple.safetensors"))
+    got = x.load_matrices(f, lambda s: s, torch.float32, "cpu", True)["ple.weight"]
+    tiles = codes.reshape(-1, int(32 * K))
+    ends = (torch.arange(128) + 1) * int(2 * K)
+    v = x.codebook(x.ring_states(x.tile_bits(tiles, K), ends, 20), "pmcgx").reshape(out, inp)
+    want = (v.reshape(-1, 128) @ x.hadamard(128)).view(out, inp) * suh.float() * svh.float().unsqueeze(1)
+    assert torch.equal(got, want)

@@ -339,9 +339,9 @@ stored names.
 
 | field | values |
 |---|---|
-| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block |
+| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block, 9 row trellis |
 | 1 out, 2 in | full matrix shape |
-| 3 K | trellis width, else 0 |
+| 3 K | trellis width, else 0; a half-integer K as −2K (−9 for K4.5) |
 | 4 sharded side | 0 replicated, 1 output channels, 2 input channels |
 | 5 channels per sharding unit | 0 if replicated |
 | 6 shared input rotation (trellis) | 0 own; i ≥ 1: entry i of metadata `rotations` (absent: 1 `attn_in`, 2 `q_resid`, 3 `mlp_in`) |
@@ -357,18 +357,35 @@ stored names.
 | 6 BF16 | `bf16` [out, in] | as stored |
 | 7 FP32 | `fp32` [out, in] | as stored |
 | 8 FP8 32×32 block | `fp8` U8, `e8m0` U8; side 2: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
+| 9 row trellis | `rows` U8 [out, in/256 · 32K], `suh` F16 [in], `svh` F16 [out] | see [Row trellis](#row-trellis) |
 
 | file | contents |
 |---|---|
 | `exlr8-dense-LLL` | layer L's matrices and vectors; metadata `layer` |
 | `exlr8-vocab` | `embed_tokens`, `lm_head`, `norm.weight` |
-| `exlr8-extra-NAME` | tensors outside the decoder layers, full HF names |
+| `exlr8-extra-NAME` | tensors outside the decoder layers, full HF names; a matrix under its HF name less `.weight` |
 | `exlr8-split-NAME.pPPP` | `M.record` (full shape) + rows [r0, r1) of M's row-major data tensors + `M.checksum` of those rows (r0 a multiple of 128); metadata `rows` = `r0-r1`, `parts`, and for a layer's matrix `layer` and NAME = `LLL.<stored name>` |
 
 Dense checksum: one U64 per 128-channel block of the sharded side (per 128 output rows if replicated), xxhash64 seed 0
 over that block's rows of each data tensor (int4 side 2: entry b of `q4` then of `s4`; FP8 block: scale row b;
-trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; FP8 32×32 block: rows 128b.. of
-`fp8` ‖ rows 4b..4b+3 of `e8m0`, or entry b of each on side 2).
+trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; row trellis: rows 128b.. of
+`rows` ‖ `svh` of those rows ‖ the whole `suh`; FP8 32×32 block: rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`, or
+entry b of each on side 2).
+
+### Row trellis
+
+For lookup tables such as embeddings, where an engine reads single rows. Each row decodes from its own bytes: the
+rotation runs along the row only, and no tile spans two rows.
+
+Row r is in/256 tiles. Tile t holds the row's values 256t..256t+255 at stream positions 0..255 in order, with no
+tile permutation, decoded through stream, states and codebook as above. With v_r the row's in decoded values,
+
+W[r, c] = suh[c] · (Hb v_r)[c] · svh[r]
+
+where Hb applies the 128 × 128 Hadamard to each run of 128 values, as in the trellis decode. `suh` carries the
+column signs. The record gives sharded side 1 and 1 channel per sharding unit (any row split works), K in field 3,
+and the codebook names `rows` as it names `trellis` (`rows.pmcgx`). A table whose rows hold one 256-value slice per
+layer, as Gemma 4's per-layer embeddings do, reads one tile per layer per token.
 
 ### Dense codebooks
 

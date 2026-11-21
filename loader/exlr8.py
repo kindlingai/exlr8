@@ -41,10 +41,11 @@ CODEBOOKS = {"mcg": (16, ("0xCBAC1FED",)), "mul1": (16, ("0x83DCD12D",)), "pmcgx
 CODEBOOKS.update({f"{k}-f16": v for k, v in list(CODEBOOKS.items())})
 FORMATS = ("exlr8-v2", "exlr8-v4")
 MIXING = ("none", "width", "expert")
-TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32 = 1, 2, 3, 4, 5, 6, 7, 8     # record field 0
+TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS = 1, 2, 3, 4, 5, 6, 7, 8, 9  # record field 0
 IN = 2                                  # record field 4: 0 replicated, 1 output side, 2 input side
 DATA = {TRELLIS: ("trellis", "suh", "svh"), INT4: ("q4", "s4"), MXFP8: ("fp8", "e8m0"), FP8_BLOCK: ("fp8", "scale"),
-        FP8_ROW: ("fp8", "scale"), BF16: ("bf16",), FP32: ("fp32",), FP8_B32: ("fp8", "e8m0")}     # in checksum order
+        FP8_ROW: ("fp8", "scale"), BF16: ("bf16",), FP32: ("fp32",), FP8_B32: ("fp8", "e8m0"),
+        ROWS: ("rows", "svh", "suh")}     # in checksum order
 DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I64": torch.int64,
           "I32": torch.int32, "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8, "U64": torch.int64}
 ST_NAMES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32", torch.int64: "I64",
@@ -447,7 +448,14 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
     """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored, with
     a trellis matrix's data under `trellis` whatever its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
+    K = K if K >= 0 else -K / 2      # a half width is written as -2K
     t = {k: v.to(device) for k, v in t.items()}
+    if fmt == ROWS:         # tile t of row r: values 256t.. in stream order, rotated along the row only
+        check_width(K, cb)
+        n = t["rows"].shape[0] * inp // 256
+        v = decode_tiles(t["rows"].reshape(n, int(32 * K)), K, cb).view(n, 256)[:, tile_perm().to(device)]
+        v = (v.reshape(-1, 128) @ hadamard(128, device)).view(out, inp)
+        return v * t["suh"].float().unsqueeze(0) * t["svh"].float().unsqueeze(1)
     if fmt == TRELLIS:
         check_width(K, cb)
         ent = t["trellis"]
@@ -493,6 +501,8 @@ def dense_checksums(rec, t):
         if fmt == TRELLIS:
             own, other = ("suh", "svh") if side == IN else ("svh", "suh")
             parts = [t["trellis"][b], t[own][r], t[other]]
+        elif fmt == ROWS:
+            parts = [t["rows"][r], t["svh"][r], t["suh"]]
         elif fmt in (INT4, FP8_B32) and side == IN:
             parts = [t[k][b] for k in DATA[fmt]]
         elif fmt == FP8_B32:
@@ -531,13 +541,14 @@ def dense_matrices(f, widths=None):
     def tensors(base):
         """base's codebook and {data suffix: tensor name}, checked against the `codebooks` metadata."""
         fmt = int(f.get(base + ".record")[0])
-        found = [n[len(base) + len(".trellis."):] for n in names if n.startswith(base + ".trellis.")]
+        codes = "rows" if fmt == ROWS else "trellis"
+        found = [n[len(f"{base}.{codes}."):] for n in names if n.startswith(f"{base}.{codes}.")]
         cb = found[0] if found else "mcg"
         if found and (len(found) > 1 or cb not in listed):
             raise ValueError(f"{f.path}: {base} names codebooks {found}, metadata codebooks lists {sorted(listed)}")
         if found:
             check_codebook_text(cb, listed[cb])
-        return cb, {s: f"{base}.{s}.{cb}" if s == "trellis" and found else f"{base}.{s}" for s in DATA[fmt]}
+        return cb, {s: f"{base}.{s}.{cb}" if s == codes and found else f"{base}.{s}" for s in DATA[fmt]}
 
     mats, owned = {}, set()
     for m, ws in stored.items():
