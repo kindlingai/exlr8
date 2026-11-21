@@ -8,7 +8,7 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 |---|---|---|
 | v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
 | v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
-| v4 | widths K0.5-K6 with pmcgx half widths, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires` | `exlr8-v4` |
+| v4 | widths K0.5-K6 with pmcgx half widths, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths | `exlr8-v4` |
 
 A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
 features are a subset; a v2 reader refuses v4 files by their `format`.
@@ -370,6 +370,26 @@ over that block's rows of each data tensor (int4 side 2: entry b of `q4` then of
 trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; FP8 32×32 block: rows 128b.. of
 `fp8` ‖ rows 4b..4b+3 of `e8m0`, or entry b of each on side 2).
 
+### Dense codebooks
+
+A trellis matrix names its codebook as an expert file does: `M.trellis` is mcg, and `M.trellis.<codebook>` names
+any other (`o_proj.trellis.pmcgx`). A file holding any such matrix sets `codebooks` in its metadata: every non-mcg
+codebook its matrices use, `; ` between them, each as a single-codebook file's `codebook`. Refuse a matrix whose
+codebook is missing from `codebooks` or not one you implement, and check its K against the codebook's
+[widths](#widths).
+
+### Dense widths
+
+A trellis matrix may be stored at several widths, so that manifests can choose between them. Each stored width
+then takes the prefix `M.kK.` in place of `M.`: `M.kK.record`, `M.kK.checksum` and `M.kK.trellis[.<codebook>]`,
+`M.kK.suh`, `M.kK.svh`, with K the width name (`q_proj.k2.record`, `q_proj.k3.record`). Record field 3 holds the
+same K. Each width is a separate encode with its own side vectors and may use its own codebook, but every width of
+M has the same shape, sharded side and channels per sharding unit. Such a matrix has no `M.record`.
+
+The manifest's [`dense`](#manifestsexlr8-manifest-namejson) object picks one width for each such matrix. Refuse a
+manifest that leaves one out or names a width the file does not hold. Only `exlr8-dense-LLL` files hold several
+widths. A matrix stored at one width keeps the plain `M.` names, and a manifest gives it no entry.
+
 The vocab file may carry `hf_names`, JSON from its stored names to HF names, when they are not GLM-5.3's.
 
 ### GLM-5.3 release
@@ -432,19 +452,20 @@ are vectors, stored as-is. The vision tower and aligner are `exlr8-extra-vision`
 | `layers["L"].gate`, `.up` | [E][U] widths per (expert, unit) |
 | `layers["L"].down` | [E] widths, one per expert |
 | `layers["L"].shared` | `{"gate": [U], "up": [U], "down": K}` |
+| `dense["L"]` | `{"<stored name>": K}` for every matrix of `exlr8-dense-LLL` stored at several [widths](#dense-widths); absent when no file has one |
 | `requires` | what an engine needs to serve the manifest, below |
 
 A width is K (a JSON number: `4`, `4.5`), or a native store's name.
 
 ### requires
 
-The union over every unit the manifest selects, so an engine can refuse a manifest from this one object, before it
+The union over every unit and `dense` width the manifest selects, so an engine can refuse a manifest from this one object, before it
 opens an expert file. The files stay authoritative: an engine still resolves each file's tensor names and checks
 each unit as above.
 
 | key | value |
 |---|---|
-| `requires.trellis` | sorted list of `"<width name> <codebook>"`, one per (width, codebook) any selected unit uses, e.g. `["k2 mul1", "k4 mul1", "k4p5 pmcgx"]`; experts of a mixed file count under their own codebooks |
+| `requires.trellis` | sorted list of `"<width name> <codebook>"`, one per (width, codebook) any selected unit or `dense` width uses, e.g. `["k2 mul1", "k4 mul1", "k4p5 pmcgx"]`; experts of a mixed file count under their own codebooks |
 | `requires.stores` | sorted list of the native stores any selected unit uses (`[]`: none) |
 | `requires.mixing` | `none`: each layer's selected units use one codebook; `width`: some layer's widths use different codebooks, each width one; `expert`: some layer has a mixed file with more than one codebook among its selected experts |
 

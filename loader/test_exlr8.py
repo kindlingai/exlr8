@@ -266,3 +266,57 @@ def test_mixed_file_refused(tmp_path, meta):
         layer = x.ExpertLayer(str(tmp_path), 3)
         for e in range(E):
             layer.half(e, "gate", 0, 4.5)
+
+
+PMCGX_TEXT = "pmcgx V2 L20 0xCBAC1FED 0xBCA14C51, E4M3 rounding"
+
+
+def dense_trellis(base, K, cb, g):
+    """A 256 x 128 trellis matrix on the output side, its tensors under base."""
+    out, inp = 256, 128
+    ent = torch.randint(0, 256, (out // 128, int(16 * K * inp)), dtype=torch.uint8, generator=g)
+    suh, svh = torch.randn(inp, generator=g).half(), torch.randn(out, generator=g).half()
+    sums = [x.xxh64(ent[b], svh[128 * b:128 * b + 128], suh) for b in range(out // 128)]
+    name = f"{base}.trellis" + ("" if cb == "mcg" else f".{cb}")
+    return {f"{base}.record": torch.tensor([x.TRELLIS, out, inp, K, 1, 128, 0, 1]),
+            f"{base}.checksum": ("U64", torch.tensor([c - 2 ** 64 if c >= 2 ** 63 else c for c in sums])),
+            name: ent, f"{base}.suh": suh, f"{base}.svh": svh}
+
+
+def dense_file(root, meta):
+    """Layer 0 with q_proj at K2 (mcg) and K3 (pmcgx), o_proj at K4 (pmcgx) alone, and a q_proj.bias vector."""
+    os.makedirs(os.path.join(root, "dense"), exist_ok=True)
+    g = torch.Generator().manual_seed(5)
+    t = {**dense_trellis("q_proj.k2", 2, "mcg", g), **dense_trellis("q_proj.k3", 3, "pmcgx", g),
+         **dense_trellis("o_proj", 4, "pmcgx", g), "q_proj.bias": torch.randn(256, generator=g).half()}
+    write_st(os.path.join(root, "dense", "exlr8-dense-000.safetensors"), t, meta)
+    return t
+
+
+DENSE_META = {"format": "exlr8-v4", "layer": "0", "tensor_prefix": "m.", "codebooks": PMCGX_TEXT}
+
+
+def test_dense_widths(tmp_path):
+    t = dense_file(str(tmp_path), DENSE_META)
+    for K, cb in ((2, "mcg"), (3, "pmcgx")):
+        got = x.load_layer(str(tmp_path), {"layers": {}, "dense": {"0": {"q_proj": K}}}, 0, torch.float32,
+                           verify=True)
+        assert sorted(got) == ["m.0.o_proj.weight", "m.0.q_proj.bias", "m.0.q_proj.weight"]
+        base = f"q_proj.k{K}"
+        data = {"trellis": t[f"{base}.trellis" + ("" if cb == "mcg" else ".pmcgx")],
+                "suh": t[f"{base}.suh"], "svh": t[f"{base}.svh"]}
+        assert torch.equal(got["m.0.q_proj.weight"], x.decode_dense(t[f"{base}.record"], data, cb=cb))
+    assert not torch.equal(x.decode_tiles(data["trellis"][0, :96].view(1, 96), 3, "pmcgx"),
+                           x.decode_tiles(data["trellis"][0, :96].view(1, 96), 3, "mcg"))
+
+
+@pytest.mark.parametrize("dense, meta", [
+    ({}, DENSE_META),                                       # q_proj has two widths and no pick
+    ({"q_proj": 4}, DENSE_META),                            # a width the file does not hold
+    ({"q_proj": 2, "o_proj": 4}, DENSE_META),               # o_proj has one width
+    ({"q_proj": 2}, {**DENSE_META, "codebooks": ""}),       # pmcgx tensors, no codebooks metadata
+])
+def test_dense_widths_refused(tmp_path, dense, meta):
+    dense_file(str(tmp_path), meta)
+    with pytest.raises(ValueError):
+        x.load_layer(str(tmp_path), {"layers": {}, "dense": {"0": dense}}, 0)

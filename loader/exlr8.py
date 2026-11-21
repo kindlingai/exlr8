@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import os
+import re
 import struct
 
 import torch
@@ -442,16 +443,18 @@ class ExpertLayer:
 
 # ---------------------------------------------------------------- dense and vocabulary
 
-def decode_dense(rec, t, device="cpu"):
-    """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored."""
+def decode_dense(rec, t, device="cpu", cb="mcg"):
+    """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored, with
+    a trellis matrix's data under `trellis` whatever its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
     t = {k: v.to(device) for k, v in t.items()}
     if fmt == TRELLIS:
+        check_width(K, cb)
         ent = t["trellis"]
         if side == IN:      # entry g = input rows 128g.., tiles as down halves
-            T = torch.cat([tiles_in_major(ent[g], K, out) for g in range(ent.shape[0])], 0)
+            T = torch.cat([tiles_in_major(ent[g], K, out, cb) for g in range(ent.shape[0])], 0)
         else:               # entry g = output columns 128g.., tiles as gate/up halves
-            T = torch.cat([tiles_out_major(ent[g], K, inp, 128) for g in range(ent.shape[0])], 1)
+            T = torch.cat([tiles_out_major(ent[g], K, inp, 128, cb) for g in range(ent.shape[0])], 1)
         return reconstruct(T, t["suh"], t["svh"]).T
     if fmt == INT4:
         q4, s4 = t["q4"], t["s4"]
@@ -502,21 +505,70 @@ def dense_checksums(rec, t):
     return sums
 
 
-def load_matrices(f, prefix, dtype, device, verify, raw=False):
-    """Every tensor of a dense or vocabulary file: matrices decoded (by their records), vectors as stored. With raw,
-    FP8 32x32 block matrices come back as the source's (weight, scale), MXFP8 as (weight, scale) too, and BF16 as
-    stored."""
-    names = f.names()
-    mats = [n[:-len(".record")] for n in names if n.endswith(".record")]
-    out, owned = {}, set()
-    for m in mats:
-        rec = f.get(m + ".record")
-        t = {s: f.get(f"{m}.{s}") for s in DATA[int(rec[0])]}
-        if verify:
-            want = [int(v) & (2 ** 64 - 1) for v in f.get(m + ".checksum")]
-            if dense_checksums(rec, t) != want:
-                raise ValueError(f"{f.path}: {m} checksum mismatch")
+def dense_matrices(f, widths=None):
+    """{stored name: (base, codebook, {data suffix: tensor name})} for every matrix of a dense or vocabulary file,
+    and the set of every tensor name a matrix owns, unpicked widths included. base prefixes the matrix's tensors: `M`,
+    or `M.kK` for a matrix stored at several widths (FORMAT.md "Dense widths"), K picked by widths, {stored name: K}
+    from the manifest's `dense` object."""
+    names = set(f.names())
+    stored = {}
+    for n in names:
+        if not n.endswith(".record"):
+            continue
+        base = n[:-len(".record")]
+        m, _, w = base.rpartition(".")
+        if m and re.fullmatch(r"k\d+(p5)?", w) and f"{m}.record" not in names:
+            stored.setdefault(m, {})[w] = base
+        else:
+            stored[base] = {None: base}
+    widths = widths or {}
+    extra = set(widths) - {m for m, ws in stored.items() if None not in ws}
+    if extra:
+        raise ValueError(f"{f.path}: the manifest picks widths for {sorted(extra)}, which have one width")
+    texts = [x.strip() for x in f.meta.get("codebooks", "").split(";") if x.strip()]
+    listed = {x.replace(",", " ").split()[0]: x for x in texts}
+
+    def tensors(base):
+        """base's codebook and {data suffix: tensor name}, checked against the `codebooks` metadata."""
+        fmt = int(f.get(base + ".record")[0])
+        found = [n[len(base) + len(".trellis."):] for n in names if n.startswith(base + ".trellis.")]
+        cb = found[0] if found else "mcg"
+        if found and (len(found) > 1 or cb not in listed):
+            raise ValueError(f"{f.path}: {base} names codebooks {found}, metadata codebooks lists {sorted(listed)}")
+        if found:
+            check_codebook_text(cb, listed[cb])
+        return cb, {s: f"{base}.{s}.{cb}" if s == "trellis" and found else f"{base}.{s}" for s in DATA[fmt]}
+
+    mats, owned = {}, set()
+    for m, ws in stored.items():
+        for base in ws.values():
+            owned.update([base + ".record", base + ".checksum", *tensors(base)[1].values()])
+        if None in ws:
+            base = ws[None]
+        elif m not in widths:
+            raise ValueError(f"{f.path}: {m} is stored at {sorted(ws)} and the manifest picks none")
+        elif width_name(widths[m]) not in ws:
+            raise ValueError(f"{f.path}: the manifest picks {width_name(widths[m])} for {m}, stored at {sorted(ws)}")
+        else:
+            base = ws[width_name(widths[m])]
+        mats[m] = (base, *tensors(base))
+    return mats, owned
+
+
+def load_matrices(f, prefix, dtype, device, verify, raw=False, widths=None):
+    """Every tensor of a dense or vocabulary file: matrices decoded (by their records), vectors as stored. widths:
+    the manifest's `dense` entry for this file. With raw, FP8 32x32 block matrices come back as the source's
+    (weight, scale), MXFP8 as (weight, scale) too, and BF16 as stored."""
+    mats, owned = dense_matrices(f, widths)
+    out = {}
+    for m, (base, cb, data) in mats.items():
+        rec = f.get(base + ".record")
         fmt, side = int(rec[0]), int(rec[4])
+        t = {s: f.get(n) for s, n in data.items()}
+        if verify:
+            want = [int(v) & (2 ** 64 - 1) for v in f.get(base + ".checksum")]
+            if dense_checksums(rec, t) != want:
+                raise ValueError(f"{f.path}: {base} checksum mismatch")
         if raw and fmt in (FP8_B32, MXFP8):
             q, s = fp8_b32_rows(t, side) if fmt == FP8_B32 else (t["fp8"], t["e8m0"])
             out[prefix(m) + ".weight"] = q.view(torch.float8_e4m3fn)
@@ -524,9 +576,8 @@ def load_matrices(f, prefix, dtype, device, verify, raw=False):
         elif raw and fmt == BF16:
             out[prefix(m) + ".weight"] = t["bf16"]
         else:
-            out[prefix(m) + ".weight"] = decode_dense(rec, t, device).to(dtype).cpu()
-        owned.update(f"{m}.{s}" for s in ("record", "checksum") + DATA[int(rec[0])])
-    for n in names:
+            out[prefix(m) + ".weight"] = decode_dense(rec, t, device, cb).to(dtype).cpu()
+    for n in f.names():
         if n not in owned:
             out[prefix(n)] = f.get(n)
     return out
@@ -592,7 +643,8 @@ def load_layer(root, manifest, L, dtype=torch.bfloat16, device="cpu", verify=Fal
     store come back as the source's (weight, scale)."""
     f = SafeFile(os.path.join(root, "dense", f"exlr8-dense-{L:03d}.safetensors"))
     pre = f.meta.get("hf_prefix") or f"{f.meta.get('tensor_prefix', GLM53['tensor_prefix'])}{L}."
-    out = load_matrices(f, lambda n: pre + n, dtype, device, verify, raw)
+    widths = manifest.get("dense", {}).get(str(L))
+    out = load_matrices(f, lambda n: pre + n, dtype, device, verify, raw, widths)
     m = manifest["layers"].get(str(L))
     if m is None:                    # a dense MLP layer: no experts
         return out
