@@ -31,6 +31,8 @@ A pure-PyTorch reference loader for the format is in [`loader/`](loader/). Every
 
 The provider based Python fileset writer is in [`exlr8writer/`](exlr8writer/). It connects to a caller's checkpoint or quantization workflow through a small layer data hook.
 
+The site/encoder HTTP protocol is specified in [`protocol/`](protocol/), and the single-slot piece file format (`exlr8-v2-job`) in [PIECE.md](PIECE.md).
+
 ---
 
 ## Releases, and the engine that serves them
