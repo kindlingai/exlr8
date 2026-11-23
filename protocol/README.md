@@ -7,6 +7,7 @@ It describes existing v1 behavior only. Protocol version negotiation, presigned 
 Related specifications:
 
 - Piece file format (`exlr8-v2-job`): [`PIECE.md`](../PIECE.md)
+- Calibration Hessians and held-out inputs: [`HESSIAN.md`](../HESSIAN.md)
 - Release weight format and trellis decode: [`FORMAT.md`](../FORMAT.md)
 - Machine-readable JSON Schemas (Draft 2020-12): [`schemas/`](schemas/)
 
@@ -273,7 +274,7 @@ Releases one live, unexpired claim held by the caller and invalidates the no-slo
 
 ### `GET /api/claims/{job}/{layer}/{expert}/hess/shared`
 
-Downloads the claim's input Hessian safetensors files, synthesized on the fly via HTTP range requests from the job's Hessian stores.
+Downloads the claim's input Hessian safetensors files (see [`HESSIAN.md`](../HESSIAN.md)), synthesized on the fly via HTTP range requests from the job's Hessian stores.
 
 - **Auth**: Approved user holding a live, **unexpired** claim on `(job, layer, expert)` (else `403`).
 - **Availability**:
@@ -404,3 +405,6 @@ All schemas live in [`schemas/`](schemas/) and target JSON Schema Draft 2020-12:
 - [`piece-done.post.request.schema.json`](schemas/piece-done.post.request.schema.json)
 - [`piece-done.post.response.schema.json`](schemas/piece-done.post.response.schema.json)
 - [`piece-header.schema.json`](schemas/piece-header.schema.json) — structural schema for an `exlr8-v2-job` piece safetensors header (see [`PIECE.md`](../PIECE.md))
+- [`hess-expert-header.schema.json`](schemas/hess-expert-header.schema.json) — structural schema for `hess-LLL-eAAA-BBB.safetensors` / `hess-LLL-eEEE-EEE.safetensors` (see [`HESSIAN.md`](../HESSIAN.md))
+- [`hess-dense-header.schema.json`](schemas/hess-dense-header.schema.json) — structural schema for `hess-LLL-dense[-heldout].safetensors` / `hess-LLL-shared.safetensors` (see [`HESSIAN.md`](../HESSIAN.md))
+- [`inputs-header.schema.json`](schemas/inputs-header.schema.json) — structural schema for `inputs-LLL.safetensors` (see [`HESSIAN.md`](../HESSIAN.md))

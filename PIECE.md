@@ -126,7 +126,7 @@ Any pinned flag that is missing, differs in value, or is present when the plan o
 
 ### Weights ID
 
-`weights_id` is the lowercase 64-character hex SHA-256 digest of the source checkpoint's `config.json` bytes immediately followed by its `model.safetensors.index.json` bytes (no separator):
+`weights_id` is the lowercase 64-character hex SHA-256 digest of the source checkpoint's `config.json` bytes immediately followed by its `model.safetensors.index.json` bytes (no separator); see [`HESSIAN.md#weights-id-derivation`](HESSIAN.md#weights-id-derivation) for full rules and test vectors:
 
 ```text
 weights_id = hex(sha256(bytes("config.json") || bytes("model.safetensors.index.json")))

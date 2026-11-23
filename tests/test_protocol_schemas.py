@@ -5,7 +5,9 @@ Run with:
 or (with jsonschema installed):
     uv run --with jsonschema python -m unittest tests/test_protocol_schemas.py
 """
+import hashlib
 import json
+import math
 import unittest
 from pathlib import Path
 
@@ -39,6 +41,9 @@ EXPECTED_SCHEMAS = {
     "piece-done.post.request.schema.json",
     "piece-done.post.response.schema.json",
     "piece-header.schema.json",
+    "hess-expert-header.schema.json",
+    "hess-dense-header.schema.json",
+    "inputs-header.schema.json",
 }
 
 WEIGHTS_ID = "c2342cfd7041044364a4536816184f99bad5b2a723cfa77a4249fbab5016a2d7"
@@ -456,6 +461,159 @@ class ProtocolSchemaValidationTest(unittest.TestCase):
         bad_commit = _make_piece_header()
         bad_commit["__metadata__"]["encoder_commit"] = "1234abc-dirty"
         self.assertInvalid("piece-header.schema.json", bad_commit)
+
+    def test_hess_expert_header_schema(self):
+        h, inter, n = 128, 64, 32
+        th, ti = h * (h + 1) // 2, inter * (inter + 1) // 2
+        off1 = n * th * 4
+        off2 = off1 + n * ti * 4
+        off3 = off2 + n * 8
+        valid = {
+            "__metadata__": {
+                "hessian_id": "qwen38fn-calib-v1",
+                "weights_id": WEIGHTS_ID,
+                "layer": "3",
+                "experts": "0-31",
+                "layout": "upper triangle, row-major, fp32",
+            },
+            "gu": {"dtype": "F32", "shape": [n, th], "data_offsets": [0, off1]},
+            "down": {"dtype": "F32", "shape": [n, ti], "data_offsets": [off1, off2]},
+            "count": {"dtype": "I64", "shape": [n], "data_offsets": [off2, off3]},
+        }
+        self.assertValid("hess-expert-header.schema.json", valid)
+
+        # Site-synthesized single-expert slice with source metadata
+        sliced = {
+            "__metadata__": {**valid["__metadata__"], "experts": "5-5", "source": "hess-003-e000-031.safetensors"},
+            "gu": {"dtype": "F32", "shape": [1, th], "data_offsets": [0, th * 4]},
+            "down": {"dtype": "F32", "shape": [1, ti], "data_offsets": [th * 4, (th + ti) * 4]},
+            "count": {"dtype": "I64", "shape": [1], "data_offsets": [(th + ti) * 4, (th + ti) * 4 + 8]},
+        }
+        self.assertValid("hess-expert-header.schema.json", sliced)
+
+        # Missing required hessian_id or weights_id must fail
+        no_hid = {**valid, "__metadata__": {k: v for k, v in valid["__metadata__"].items() if k != "hessian_id"}}
+        self.assertInvalid("hess-expert-header.schema.json", no_hid)
+
+        no_wid = {**valid, "__metadata__": {k: v for k, v in valid["__metadata__"].items() if k != "weights_id"}}
+        self.assertInvalid("hess-expert-header.schema.json", no_wid)
+
+        bad_wid = {**valid, "__metadata__": {**valid["__metadata__"], "weights_id": "not-a-sha256"}}
+        self.assertInvalid("hess-expert-header.schema.json", bad_wid)
+
+        bad_layout = {**valid, "__metadata__": {**valid["__metadata__"], "layout": "full, fp32"}}
+        self.assertInvalid("hess-expert-header.schema.json", bad_layout)
+
+        bad_count_dtype = {**valid, "count": {"dtype": "I32", "shape": [n], "data_offsets": [off2, off2 + n * 4]}}
+        self.assertInvalid("hess-expert-header.schema.json", bad_count_dtype)
+
+        extra_tensor = {**valid, "extra": {"dtype": "F32", "shape": [1], "data_offsets": [off3, off3 + 4]}}
+        self.assertInvalid("hess-expert-header.schema.json", extra_tensor)
+
+    def test_hess_dense_header_schema(self):
+        h, inter = 128, 64
+        hb, ib = h * h * 4, inter * inter * 4
+        valid = {
+            "__metadata__": {
+                "hessian_id": "qwen38fn-calib-v1",
+                "weights_id": WEIGHTS_ID,
+                "layer": "3",
+                "layout": "full, fp32",
+                "sequences": "calibration",
+            },
+            "mlp_in": {"dtype": "F32", "shape": [h, h], "data_offsets": [0, hb]},
+            "count_mlp_in": {"dtype": "I64", "shape": [1], "data_offsets": [hb, hb + 8]},
+            "shared_down_in": {"dtype": "F32", "shape": [inter, inter], "data_offsets": [hb + 8, hb + 8 + ib]},
+            "count_shared_down_in": {"dtype": "I64", "shape": [1], "data_offsets": [hb + 8 + ib, hb + 16 + ib]},
+            "attn_in": {"dtype": "F32", "shape": [h, h], "data_offsets": [hb + 16 + ib, 2 * hb + 16 + ib]},
+            "count_attn_in": {"dtype": "I64", "shape": [1], "data_offsets": [2 * hb + 16 + ib, 2 * hb + 24 + ib]},
+        }
+        self.assertValid("hess-dense-header.schema.json", valid)
+
+        # Held-out dense file and site-synthesized routed shared slice
+        heldout = {**valid, "__metadata__": {**valid["__metadata__"], "sequences": "held out"}}
+        self.assertValid("hess-dense-header.schema.json", heldout)
+
+        routed_shared = {
+            "__metadata__": {**valid["__metadata__"], "source": "hess-003-dense.safetensors"},
+            "mlp_in": valid["mlp_in"],
+            "count_mlp_in": valid["count_mlp_in"],
+        }
+        self.assertValid("hess-dense-header.schema.json", routed_shared)
+
+        # Missing required metadata or required mlp_in / count_mlp_in must fail
+        no_hid = {**valid, "__metadata__": {k: v for k, v in valid["__metadata__"].items() if k != "hessian_id"}}
+        self.assertInvalid("hess-dense-header.schema.json", no_hid)
+
+        no_wid = {**valid, "__metadata__": {k: v for k, v in valid["__metadata__"].items() if k != "weights_id"}}
+        self.assertInvalid("hess-dense-header.schema.json", no_wid)
+
+        bad_seq = {**valid, "__metadata__": {**valid["__metadata__"], "sequences": "eval"}}
+        self.assertInvalid("hess-dense-header.schema.json", bad_seq)
+
+        bad_count_shape = {**valid, "count_mlp_in": {"dtype": "I64", "shape": [2], "data_offsets": [hb, hb + 16]}}
+        self.assertInvalid("hess-dense-header.schema.json", bad_count_shape)
+
+        no_mlp = {k: v for k, v in valid.items() if k != "mlp_in"}
+        self.assertInvalid("hess-dense-header.schema.json", no_mlp)
+
+    def test_inputs_header_schema(self):
+        n_tok, h, top_k = 1024, 128, 8
+        xb = n_tok * h * 2
+        ib = n_tok * top_k * 4
+        wb = n_tok * top_k * 4
+        valid = {
+            "__metadata__": {
+                "hessian_id": "qwen38fn-calib-v1",
+                "weights_id": WEIGHTS_ID,
+                "layer": "3",
+                "heldout_sequences": "64",
+            },
+            "x": {"dtype": "BF16", "shape": [n_tok, h], "data_offsets": [0, xb]},
+            "topk_idx": {"dtype": "I32", "shape": [n_tok, top_k], "data_offsets": [xb, xb + ib]},
+            "topk_w": {"dtype": "F32", "shape": [n_tok, top_k], "data_offsets": [xb + ib, xb + ib + wb]},
+        }
+        self.assertValid("inputs-header.schema.json", valid)
+
+        # Missing required metadata, zero heldout_sequences, wrong dtype, or extra tensor must fail
+        no_hid = {**valid, "__metadata__": {k: v for k, v in valid["__metadata__"].items() if k != "hessian_id"}}
+        self.assertInvalid("inputs-header.schema.json", no_hid)
+
+        no_wid = {**valid, "__metadata__": {k: v for k, v in valid["__metadata__"].items() if k != "weights_id"}}
+        self.assertInvalid("inputs-header.schema.json", no_wid)
+
+        zero_seq = {**valid, "__metadata__": {**valid["__metadata__"], "heldout_sequences": "0"}}
+        self.assertInvalid("inputs-header.schema.json", zero_seq)
+
+        wrong_x_dtype = {**valid, "x": {"dtype": "F16", "shape": [n_tok, h], "data_offsets": [0, xb]}}
+        self.assertInvalid("inputs-header.schema.json", wrong_x_dtype)
+
+        wrong_idx_dtype = {**valid, "topk_idx": {"dtype": "I64", "shape": [n_tok, top_k], "data_offsets": [xb, xb + 2 * ib]}}
+        self.assertInvalid("inputs-header.schema.json", wrong_idx_dtype)
+
+        extra = {**valid, "extra": {"dtype": "F32", "shape": [1], "data_offsets": [xb + ib + wb, xb + ib + wb + 4]}}
+        self.assertInvalid("inputs-header.schema.json", extra)
+
+    def test_hessian_spec_test_vectors(self):
+        # Verify HESSIAN.md weights_id test vector
+        cfg = b'{"hidden_size":128}\n'
+        idx = b'{"weight_map":{}}\n'
+        self.assertEqual(
+            hashlib.sha256(cfg + idx).hexdigest(),
+            "24b0d8c953197327441b27e43ecf94a2f3a7adbaf84b22c9ab0123b7c22519a1",
+        )
+
+        # Verify HESSIAN.md 3x3 upper-triangle pack / unpack formula
+        v = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        d = (math.isqrt(8 * len(v) + 1) - 1) // 2
+        self.assertEqual(d, 3)
+        self.assertEqual(d * (d + 1) // 2, len(v))
+        mat = [[0.0] * d for _ in range(d)]
+        for r in range(d):
+            for c in range(r, d):
+                val = v[r * (2 * d + 1 - r) // 2 + (c - r)]
+                mat[r][c] = mat[c][r] = val
+        self.assertEqual(mat, [[1.0, 2.0, 3.0], [2.0, 4.0, 5.0], [3.0, 5.0, 6.0]])
 
 
 if __name__ == "__main__":

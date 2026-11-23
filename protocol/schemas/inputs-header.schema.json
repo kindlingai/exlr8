@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/inputs-header.schema.json",
+  "title": "Held-out expert inputs safetensors JSON header (inputs-LLL.safetensors)",
+  "description": "Structural schema for the JSON header of inputs-LLL.safetensors (HESSIAN.md). Cross-field checks (contiguous offsets, exact file size, matching n_tok across x/topk_idx/topk_w, matching top_k across topk_idx/topk_w, and x.shape[1] == H) are specified in HESSIAN.md.",
+  "type": "object",
+  "required": ["__metadata__", "x", "topk_idx", "topk_w"],
+  "properties": {
+    "__metadata__": {
+      "type": "object",
+      "required": ["hessian_id", "weights_id", "layer", "heldout_sequences"],
+      "properties": {
+        "hessian_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "weights_id": {
+          "$ref": "common.schema.json#/$defs/Sha256Hex"
+        },
+        "layer": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "heldout_sequences": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "x": {
+      "$ref": "#/$defs/MatrixBF16"
+    },
+    "topk_idx": {
+      "$ref": "#/$defs/MatrixI32"
+    },
+    "topk_w": {
+      "$ref": "#/$defs/MatrixF32"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "DataOffsets": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "integer", "minimum": 0 }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "Shape2D": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "integer", "minimum": 1 }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "MatrixBF16": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "BF16" },
+        "shape": { "$ref": "#/$defs/Shape2D" },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    },
+    "MatrixI32": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "I32" },
+        "shape": { "$ref": "#/$defs/Shape2D" },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    },
+    "MatrixF32": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "F32" },
+        "shape": { "$ref": "#/$defs/Shape2D" },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
