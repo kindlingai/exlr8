@@ -140,20 +140,24 @@ def _mask(x):
     return (x & 0x8FFF8FFF) ^ 0x3B603B60
 
 
+def mul1_byte_sum(states):
+    """mul1's hash: the sum of the four bytes of state * 0x83DCD12D, 0 to 1020."""
+    x = ((states & 0xFFFF) * MUL1) & 0xFFFFFFFF
+    return sum((x >> shift) & 0xFF for shift in (0, 8, 16, 24))
+
+
 def codebook_f16(states, cb="mcg"):
     """Trellis states -> the codebook's fp16 values, before any rounding. mcg and mul1 take 16-bit states and give one
     value each; pmcgx takes 20-bit pair states and gives [..., 2], the values of weights 2p and 2p + 1. The -f16
-    forms hash the same way."""
+    forms hash the same way; mul1-f16 alone then takes a different value (see codebook)."""
     name = cb.removesuffix("-f16")
     if name == "mcg":
         x = _mask(((states & 0xFFFF) * MCG) & 0xFFFFFFFF)
         return _fp16(x & 0xFFFF) + _fp16(x >> 16)
     if name == "mul1":
-        x = ((states & 0xFFFF) * MUL1) & 0xFFFFFFFF
-        byte_sum = sum((x >> shift) & 0xFF for shift in (0, 8, 16, 24))
         # fp16 0x6400 is 1024.0 and the binade's ulp is 1, so 1024 + byte_sum is exact. The kernel's fused
         # multiply-add rounds once: double here, then fp16, gives the same bits.
-        return ((1024 + byte_sum).double() * C_MUL1 + D_MUL1).half()
+        return ((1024 + mul1_byte_sum(states)).double() * C_MUL1 + D_MUL1).half()
     if name == "pmcgx":
         w = states & 0xFFFFF
         x1, x2 = _mask((w * MCG) & 0xFFFFFFFF), _mask((w * MCG2) & 0xFFFFFFFF)
@@ -164,7 +168,11 @@ def codebook_f16(states, cb="mcg"):
 
 def codebook(states, cb="mcg"):
     """Trellis states -> fp32 weights: the codebook's fp16 values, then, for every codebook but the -f16 forms, E4M3
-    rounding (round to nearest even, saturating)."""
+    rounding (round to nearest even, saturating). mul1-f16 is the exact (byte_sum - 510) * C_MUL1."""
+    if cb == "mul1-f16":
+        # Exact in fp32 (9 by 11 significant bits), and unlike mul1's fp16 multiply-add it lets an fp16 engine keep
+        # the integer byte_sum - 510 and apply C_MUL1 with its scales.
+        return (mul1_byte_sum(states) - 510).float() * C_MUL1
     v = codebook_f16(states, cb).float()
     if cb.endswith("-f16"):
         return v

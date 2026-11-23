@@ -169,7 +169,7 @@ xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (g
 ## Codebook
 
 The hash from trellis state to value. Σb is the sum of the four bytes of x. Each codebook below rounds the result to
-E4M3; its `-f16` form, under [fp16 codebooks](#fp16-codebooks), keeps the fp16 value.
+E4M3; its `-f16` form, under [fp16 codebooks](#fp16-codebooks), keeps the unrounded value.
 
 | codebook | tensor name | state → v |
 |---|---|---|
@@ -179,8 +179,9 @@ E4M3; its `-f16` form, under [fp16 codebooks](#fp16-codebooks), keeps the fp16 v
 
 pmcgx keeps K bits per value: each 20-bit state takes 2K new bits, so K may be a half-integer. Its `codebook`
 metadata names both multipliers.
-mul1's constants put v at (Σb − 510) · c; the fp16 operation order is part of the definition, since the result is
-rounded to E4M3 (or, in mul1-f16, used as is).
+mul1's constants put v near (Σb − 510) · c (d is the fp16 nearest −1534 c, so the centre sits at Σb = 510.27); the
+fp16 operation order is part of the definition, since the result is rounded to E4M3. mul1-f16 does not use this
+form: see [fp16 codebooks](#fp16-codebooks).
 
 The tensor name selects the codebook. mcg is the unmarked default and keeps the bare tensor names; any other
 codebook suffixes them and sets `codebook` in the trellis file's metadata. Resolve each projection as
@@ -208,11 +209,21 @@ experts.
 
 ### fp16 codebooks
 
-`mcg-f16`, `mul1-f16` and `pmcgx-f16` hash exactly as mcg, mul1 and pmcgx, and skip the E4M3 rounding: the decoded
-value is the fp16 v, and the encoder searched with those values. They suit an engine that computes in fp16 or bf16.
-An fp16 engine reproduces the encoder's weights exactly. A bf16 engine rounds v a second time (bf16 keeps 8
-significant bits, v up to 11); that error is near 2^-8 relative, far below K6's, and the format leaves it to the
-engine.
+`mcg-f16`, `mul1-f16` and `pmcgx-f16` hash exactly as mcg, mul1 and pmcgx, and skip the E4M3 rounding. mcg-f16 and
+pmcgx-f16 decode to the fp16 v. mul1-f16 decodes to exactly (Σb − 510) · c, c = fp16 `0x1EEE` as in mul1, with no
+fp16 rounding of the product (it is exact in fp32). The encoder searched with these values. They suit an engine that
+computes in fp16 or bf16. An fp16 engine reproduces the encoder's weights exactly (for mul1-f16, by keeping the
+integer, below). A bf16 engine rounds v a second time (bf16 keeps 8 significant bits, v up to 11); that error is
+near 2^-8 relative, far below K6's, and the format leaves it to the engine.
+
+mul1-f16's integer Σb − 510 is exact in fp16 (at most 510 in size), so an fp16 engine may keep the integer as the
+weight and apply c with the channel or block scales. It may decode the integer as fp16(1024 + Σb) − 1534: a dp4a
+of the four bytes that accumulates into `0x6400` (fp16 1024.0, whose ulp is 1), then one HSUB2. It may also leave
+the 1534 in every weight and subtract it at the output instead: with the input-side scales applied to the
+activations, that is 1534 times the sum of the scaled activations, one number per token for every output. Both
+use the encoder's weights exactly (the second differs only in fp32 accumulation order); mul1's fp16 multiply-add
+would not, which is why mul1-f16 is defined on the integer. A bf16 engine that keeps the integer rounds those
+above 256 in size, as above. mul1's own E4M3 definition is unchanged, and mcg-f16 and pmcgx-f16 are unaffected.
 
 | codebook | tensor name | `codebook` metadata, e.g. |
 |---|---|---|
@@ -250,17 +261,18 @@ unit checked against its checksum is checked against its codebook too.
 ### Test values
 
 Every value here is an fp16 bit pattern in hex. v is the codebook's fp16 value; the E4M3 column is v rounded to
-E4M3, written back as fp16. The `-f16` codebooks decode to v.
+E4M3, written back as fp16. mcg-f16 and pmcgx-f16 decode to v; the mul1-f16 column is the integer Σb − 510, and
+the weight is that times c.
 
-| state | mcg v | mcg E4M3 | mul1 v | mul1 E4M3 |
-|---|---|---|---|---|
-| `0x0000` | `3f60` | `3f80` | `c2e8` | `c300` |
-| `0x0001` | `304e` | `3080` | `3921` | `3900` |
-| `0x1234` | `3e0f` | `3e00` | `b89e` | `b880` |
-| `0x7fff` | `4172` | `4180` | `3fca` | `4000` |
-| `0x8000` | `b915` | `b900` | `baf2` | `bb00` |
-| `0xbeef` | `c293` | `c280` | `3124` | `3100` |
-| `0xffff` | `3acd` | `3b00` | `b936` | `b900` |
+| state | mcg v | mcg E4M3 | mul1 v | mul1 E4M3 | mul1-f16 Σb − 510 |
+|---|---|---|---|---|---|
+| `0x0000` | `3f60` | `3f80` | `c2e8` | `c300` | −510 |
+| `0x0001` | `304e` | `3080` | `3921` | `3900` | 95 |
+| `0x1234` | `3e0f` | `3e00` | `b89e` | `b880` | −85 |
+| `0x7fff` | `4172` | `4180` | `3fca` | `4000` | 288 |
+| `0x8000` | `b915` | `b900` | `baf2` | `bb00` | −128 |
+| `0xbeef` | `c293` | `c280` | `3124` | `3100` | 24 |
+| `0xffff` | `3acd` | `3b00` | `b936` | `b900` | −96 |
 
 | pmcgx state | v₂ₚ | v₂ₚ₊₁ | v₂ₚ E4M3 | v₂ₚ₊₁ E4M3 |
 |---|---|---|---|---|
@@ -281,6 +293,8 @@ little-endian u16 (pmcgx: v₂ₚ, then v₂ₚ₊₁); the E4M3 table holds eac
 | mul1 | `bc48d02cb1c14939dc47b90f870dd689d63e3b1ab69a157e65538db68677a6c8` | `ee3283e85586daec879a03d2cf93b7f33e8f3400b1c2b55e9eb4563f152a45cc` |
 | pmcgx | `c2f33d5515f86e4c296867d9ca4f6871f8c1441248b24410bebc13e49da442a5` | `7f66c49ed68c726cc5b602dc7df7788e06662000893b5fa52d4b042a834be07e` |
 
+mul1-f16's table, each Σb − 510 as a little-endian i16: `85abd370a7531193db8b9df21a70a0a4dd870464ea74d7f33fff5db3213b929b`.
+
 Tiles: one tile of 32·K bytes with byte j = (37j + 11) mod 256, decoded through stream, states, codebook, rounding
 and placement to 256 fp32 values, row-major (input, output), little-endian. The sha256 of those 1,024 bytes:
 
@@ -290,11 +304,12 @@ and placement to 256 fp32 values, row-major (input, output), little-endian. The 
 | mul1 | K1 `24848da1282fbd70` · K2 `5828c7200d079dad` · K3 `eaa28e21af3b58e2` · K4 `e24c0798dc46e799` · K5 `3d1043cb44bdf76d` |
 | pmcgx | K0.5 `dd6bc537b173f3e8` · K1 `f0c40ae8fe7f23d1` · K1.5 `36a1897a31ccd5d4` · K2 `d5b6cc4ed594469f` · K2.5 `1428ff10cbc4044b` · K3 `d4005af0b8591dc1` · K3.5 `b9898c3e54ae2d7e` · K4 `e407108ab19f224c` · K4.5 `143277248d13e27c` · K5 `c037dde67a1f5de4` |
 | mcg-f16 | K6 `626bfe33614027e1` |
-| mul1-f16 | K6 `173d104e9b4fb44b` |
+| mul1-f16 | K6 `8194763e86479b2e` |
 | pmcgx-f16 | K5.5 `8d06db3bf149c785` · K6 `b888e32d22699015` |
 
 These match gr8's separate implementation (engine/loader-rs) on every state of each codebook and on random tiles
-at K1-K5 in each codebook. `loader/test_exlr8.py` checks the reference loader against them.
+at K1-K5 in each codebook, except mul1-f16, which only the reference loader checks so far. `loader/test_exlr8.py`
+checks the reference loader against them.
 
 ## Native stores
 

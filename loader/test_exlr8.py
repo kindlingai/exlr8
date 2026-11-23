@@ -27,6 +27,10 @@ STATES = {
               [524288, ["3ea4", "395c"], ["3e80", "3980"]], [782069, ["bd2e", "4070"], ["bd00", "4080"]],
               [1048575, ["b9b0", "ac60"], ["b980", "ac80"]]],
 }
+# mul1-f16: state -> the integer byte_sum - 510; the weight is that times C_MUL1
+MUL1_F16 = {0: -510, 1: 95, 4660: -85, 32767: 288, 32768: -128, 48879: 24, 65535: -96}
+# sha256 of the table of those integers, as little-endian i16, over every state
+MUL1_F16_TABLE = "85abd370a7531193db8b9df21a70a0a4dd870464ea74d7f33fff5db3213b929b"
 # sha256 of the fp16 table and of the E4M3 table (one byte per value)
 TABLES = {
     "mcg": ("95383563929baa9d1ae5de0be22490284382673620bdd85929feea7bdbef04a9",
@@ -46,11 +50,11 @@ TILES = {
     ("pmcgx", 2): "d5b6cc4ed594469f", ("pmcgx", 2.5): "1428ff10cbc4044b", ("pmcgx", 3): "d4005af0b8591dc1",
     ("pmcgx", 3.5): "b9898c3e54ae2d7e", ("pmcgx", 4): "e407108ab19f224c", ("pmcgx", 4.5): "143277248d13e27c",
     ("pmcgx", 5): "c037dde67a1f5de4",
-    ("mcg-f16", 6): "626bfe33614027e1", ("mul1-f16", 6): "173d104e9b4fb44b",
+    ("mcg-f16", 6): "626bfe33614027e1", ("mul1-f16", 6): "8194763e86479b2e",
     ("pmcgx-f16", 5.5): "8d06db3bf149c785", ("pmcgx-f16", 6): "b888e32d22699015",
 }
 WIDTHS = {"mcg": [1, 2, 3, 4, 5], "pmcgx": [k / 2 for k in range(1, 11)],
-          "mcg-f16": [1, 2, 3, 4, 5, 6], "pmcgx-f16": [k / 2 for k in range(1, 13)]}
+          "mcg-f16": [1, 2, 3, 4, 5, 6], "mul1-f16": [1, 2, 3, 4, 5, 6], "pmcgx-f16": [k / 2 for k in range(1, 13)]}
 
 
 def hex16(t):
@@ -69,7 +73,23 @@ def test_codebook_states(cb):
         s = torch.tensor([state])
         assert hex16(x.codebook_f16(s, cb)) == v
         assert hex16(x.codebook(s, cb).half()) == rounded
-        assert hex16(x.codebook(s, cb + "-f16").half()) == v
+        if cb != "mul1":
+            assert hex16(x.codebook(s, cb + "-f16").half()) == v
+
+
+def test_mul1_f16_states():
+    for state, n in MUL1_F16.items():
+        assert x.codebook(torch.tensor([state]), "mul1-f16").item() == n * x.C_MUL1
+
+
+def test_mul1_f16_table():
+    states = torch.arange(1 << 16)
+    n = x.mul1_byte_sum(states) - 510
+    assert sha(n.to(torch.int16).numpy().tobytes()) == MUL1_F16_TABLE
+    # exact in fp32, and within half an fp16 ulp plus mul1's 0.27 c offset of mul1's fp16 value
+    v = x.codebook(states, "mul1-f16")
+    assert torch.equal(v.double(), n.double() * x.C_MUL1)
+    assert (v - x.codebook_f16(states, "mul1").float()).abs().max() < 0.003
 
 
 @pytest.mark.parametrize("cb", sorted(TABLES))
@@ -79,7 +99,8 @@ def test_codebook_tables(cb):
     e4 = x.codebook(states, cb).to(torch.float8_e4m3fn).reshape(-1).contiguous()
     assert sha(f16.view(torch.int16).numpy().tobytes()) == TABLES[cb][0]
     assert sha(e4.view(torch.uint8).numpy().tobytes()) == TABLES[cb][1]
-    assert torch.equal(x.codebook(states, cb + "-f16").reshape(-1), f16.float())
+    if cb != "mul1":
+        assert torch.equal(x.codebook(states, cb + "-f16").reshape(-1), f16.float())
 
 
 # ---------------------------------------------------------------- tiles
