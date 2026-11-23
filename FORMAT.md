@@ -1,6 +1,17 @@
-# exlr8 v2 file format
+# exlr8 v4 file format
 
 Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
+
+## Versions
+
+| version | adds | format strings |
+|---|---|---|
+| v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
+| v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
+| v4 | widths K0.5-K6 with pmcgx half widths, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths | `exlr8-v4` |
+
+A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
+features are a subset; a v2 reader refuses v4 files by their `format`.
 
 ## Symbols
 
@@ -10,11 +21,12 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 | I | routed expert intermediate size | `PkK.gate.svh` width; metadata `moe_intermediate_size` | 2048 |
 | U | units per expert, I / 128 | | 16 |
 | E | routed experts in a layer | `kK.index` rows; metadata `experts` | 256 |
-| K | trellis bits per weight | `widths`, `shared_widths` | 2, 3, 4 |
+| K | trellis bits per weight: 1 to 5 (6 for an `-f16` codebook), or a half-integer from 0.5 for a [pair codebook](#widths) | `widths`, `shared_widths` | 2, 3, 4 |
+| kK | width name: `k` + K, with `p5` for the half (`k4p5` is K = 4.5, `k0p5` is K = 0.5) | | `k2` `k3` `k4` |
 | store | where a unit's bytes live: `kK` for trellis width K, or a [native store](#native-stores) name | | `k2` `k3` `k4` |
 | L | layer id | file name, metadata `layer` | 0-78 |
 | unit u | intermediate channels 128u..128u+127 of one expert (`half` in metadata names) | | |
-| B | bytes per unit at width K = H·16·K | | K2 196,608 · K3 294,912 · K4 393,216 |
+| B | bytes per unit at width K = H·16·K | | K0.5 49,152 · K1 98,304 · K2 196,608 · K3 294,912 · K4 393,216 · K4.5 442,368 · K5 491,520 · K6 589,824 |
 | S | stride between units: B, or ⌈B / 65,536⌉·65,536 if `pad_halves` | | B |
 
 H and I are multiples of 128; the shared expert has intermediate size I. Layers 0..`first_moe_layer`−1 are dense MLP; layers ≥ `num_hidden_layers` are MTP layers.
@@ -47,7 +59,7 @@ dense/exlr8-vocab.safetensors                  embed_tokens, lm_head, final norm
 dense/exlr8-extra-NAME.safetensors             tensors outside the decoder layers (vision tower, ...)
 dense/exlr8-split-NAME.pPPP.safetensors        row ranges of one matrix too large for one file
 experts/exlr8-layer-LLL.index.safetensors      MoE layers: offsets, side data, checksums, error tables
-experts/exlr8-layer-LLL.kK.safetensors         MoE layers: trellis bytes, one file per stored K
+experts/exlr8-layer-LLL.kK.safetensors         MoE layers: trellis bytes, one file per stored K (width name)
 experts/exlr8-layer-LLL.STORE.safetensors      MoE layers: native store bytes, one file per native store
 manifests/exlr8-manifest-NAME.json             width per unit
 index-slices/tpN/STORE/rankR.safetensors       one rank's share of every index file, per store (kK or native)
@@ -62,8 +74,8 @@ hashes/<path>.sha256                           "<sha256> <bytes>"; expert files 
 | data start | 65,536 (header padded with spaces) |
 | tensor offsets | multiples of 65,536 |
 | gaps | `__pad.N` uint8 zeros |
-| `__metadata__.format` | `exlr8-v2` (`exlr8-v2-index-slice` for index slices) |
-| `__metadata__.scheme` | `exlr8-e4m3-v2`; `exlr8-native-v2` in a release with no trellis data |
+| `__metadata__.format` | `exlr8-v4` (`exlr8-v4-index-slice` for index slices) |
+| `__metadata__.scheme` | `exlr8-trellis-v4`; `exlr8-native-v4` in a release with no trellis data. Rounding belongs to each [codebook](#codebook) |
 
 Index slices are the exception: they are packed, with the header padded with spaces to a multiple of 8, tensors in
 order of decreasing item size and then by name (so each is naturally aligned), no `__pad.N` and no `scheme`.
@@ -76,17 +88,22 @@ order of decreasing item size and then by name (so each is naturally aligned), n
 | `shared.trellis.gate` `.up` `.down` | U8 | [U·S] | shared expert's units |
 
 A codebook other than mcg suffixes every one of these names, e.g. `trellis.gate.mul1`; see [Codebook](#codebook).
+A file whose experts use different codebooks suffixes them `.mix` and adds a codebook table; see
+[Mixed codebooks](#mixed-codebooks).
 
 | metadata | value |
 |---|---|
-| `layer`, `k`, `hessian`, `pad_halves`, `index_file` | |
+| `layer`, `hessian`, `pad_halves`, `index_file` | |
+| `k` | K as a decimal, e.g. `4` or `4.5` |
 | `gate_up_order` | `grouped` |
 | `down_order` | `item128` |
-| `codebook` | required when the codebook is not mcg |
+| `codebook` | required when the codebook is not mcg; `mix` in a mixed file |
+| `codebooks` | mixed files only: the codebook of each id |
 
 ## experts/exlr8-layer-LLL.index.safetensors
 
-`P` = `` (routed, E' = E) or `shared.` (E' = 1). One `PkK.` block per stored width. A native store's block is in
+`P` = `` (routed, E' = E) or `shared.` (E' = 1). One `PkK.` block per stored width, named by the width name
+(`k4p5.index`). A native store's block is in
 [Native stores](#native-stores). `signs.in` and `signs.out` are present when the layer stores a trellis width.
 
 | tensor | dtype | shape | contents |
@@ -125,7 +142,8 @@ A codebook other than mcg suffixes every one of these names, e.g. `trellis.gate.
 ### Expert checksum
 
 xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (gate/up `svh[128u:128u+128]`, down
-`suh[128u:128u+128]`, F16) ‖ the projection's H/128 block scales (F16).
+`suh[128u:128u+128]`, F16) ‖ the projection's H/128 block scales (F16). In a mixed file, the expert's codebook id
+(one byte) follows.
 
 ## Tiles
 
@@ -140,26 +158,29 @@ xxhash64, seed 0, over: the unit's B trellis bytes ‖ its 128 channel values (g
 
 | step | operation |
 |---|---|
-| bits → states | int16 words in pairs, the two words of each pair swapped; bits MSB first; K bits per value, 256 values; state i = the 16 bits ending at value i, wrapping |
-| codebook | the file's codebook, below |
-| rounding | v → E4M3 (nearest even, clamp ±448) → fp32 (required) |
+| bits → stream | int16 words in pairs, the two words of each pair swapped; bits MSB first; 256·K bits, read as a ring (wrapping) |
+| stream → states | mcg, mul1 (and their `-f16` forms): K bits per value; state i = the 16 bits ending at bit K(i + 1). pmcgx: see [Codebook](#codebook) |
+| codebook | the file's codebook, below, or in a mixed file the expert's |
+| rounding | E4M3 codebooks: v → E4M3 (nearest even, clamp ±448) → fp32 (required). `-f16` codebooks: none, v is the fp16 value |
 | placement | stream position j = 8t + i, t = 0..31, i = 0..7; r0 = 2(t mod 4), c0 = ⌊t/4⌋; (row, col) = [(r0,c0), (r0+1,c0), (r0+8,c0), (r0+9,c0), (r0,c0+8), (r0+1,c0+8), (r0+8,c0+8), (r0+9,c0+8)][i] |
 | rotation | Hb = block-diagonal Sylvester Hadamard, 128 × 128, scaled 1/√128 |
 | matrix | W = diag(suh) · Hb · T · Hb · diag(svh); HF weight = Wᵀ |
 
 ## Codebook
 
-The hash from trellis state to value. Σb is the sum of the four bytes of x; every codebook rounds the result to E4M3.
+The hash from trellis state to value. Σb is the sum of the four bytes of x. Each codebook below rounds the result to
+E4M3; its `-f16` form, under [fp16 codebooks](#fp16-codebooks), keeps the fp16 value.
 
 | codebook | tensor name | state → v |
 |---|---|---|
 | mcg | `trellis.gate` | x = (state · 0xCBAC1FED) mod 2³²; x = (x & 0x8FFF8FFF) ^ 0x3B603B60; v = fp16(x & 0xFFFF) + fp16(x >> 16) |
 | mul1 | `trellis.gate.mul1` | x = (state · 0x83DCD12D) mod 2³²; v = fp16(1024 + Σb) · c + d, c = fp16 `0x1EEE`, d = fp16 `0xC931` |
-| pmcgx | `trellis.gate.pmcgx` | values 2p and 2p + 1 share one 20-bit state w, the 20 bits ending at value 2p + 1, wrapping; x₁ = (w · 0xCBAC1FED) mod 2³², x₂ = (w · 0xBCA14C51) mod 2³², each masked as mcg's x; v₂ₚ = fp16(x₁ & 0xFFFF) + fp16(x₂ >> 16), v₂ₚ₊₁ = fp16(x₁ >> 16) + fp16(x₂ & 0xFFFF) |
+| pmcgx | `trellis.gate.pmcgx` | values 2p and 2p + 1 share one 20-bit state w, the 20 bits ending at bit 2K(p + 1), wrapping; x₁ = (w · 0xCBAC1FED) mod 2³², x₂ = (w · 0xBCA14C51) mod 2³², each masked as mcg's x; v₂ₚ = fp16(x₁ & 0xFFFF) + fp16(x₂ >> 16), v₂ₚ₊₁ = fp16(x₁ >> 16) + fp16(x₂ & 0xFFFF) |
 
-pmcgx keeps K bits per value: each 20-bit state takes 2K new bits. Its `codebook` metadata names both multipliers.
+pmcgx keeps K bits per value: each 20-bit state takes 2K new bits, so K may be a half-integer. Its `codebook`
+metadata names both multipliers.
 mul1's constants put v at (Σb − 510) · c; the fp16 operation order is part of the definition, since the result is
-rounded to E4M3.
+rounded to E4M3 (or, in mul1-f16, used as is).
 
 The tensor name selects the codebook. mcg is the unmarked default and keeps the bare tensor names; any other
 codebook suffixes them and sets `codebook` in the trellis file's metadata. Resolve each projection as
@@ -169,6 +190,111 @@ yields plausible wrong weights and no error.
 
 Each trellis file selects its own codebook, so the widths of one layer may use different codebooks. The index
 file's `codebook` records the encode it was written from and selects nothing.
+
+### Widths
+
+| codebook | K |
+|---|---|
+| mcg, mul1 | 1, 2, 3, 4, 5 |
+| mcg-f16, mul1-f16 | 1, 2, 3, 4, 5, 6 |
+| pmcgx (a pair codebook: 2K new bits per state) | 0.5 to 5 in steps of 0.5 (2K = 1 … 10) |
+| pmcgx-f16 | 0.5 to 6 in steps of 0.5 (2K = 1 … 12) |
+
+A tile is 32·K bytes at every width (16 at K0.5, 144 at K4.5), so its 16·K words still come in pairs. Refuse a
+half-integer K with a codebook that is not a pair codebook, and K6 with an E4M3 codebook. The E4M3 rounding caps
+quality near K5: on GLM-5.3 experts it raised the Hessian-weighted error 2% at K4.5, 12% at K5 and 2.3x at K6,
+against the same encode without it, which is why the E4M3 widths stop at K5. K0.5 is meant for rarely routed
+experts.
+
+### fp16 codebooks
+
+`mcg-f16`, `mul1-f16` and `pmcgx-f16` hash exactly as mcg, mul1 and pmcgx, and skip the E4M3 rounding: the decoded
+value is the fp16 v, and the encoder searched with those values. They suit an engine that computes in fp16 or bf16.
+An fp16 engine reproduces the encoder's weights exactly. A bf16 engine rounds v a second time (bf16 keeps 8
+significant bits, v up to 11); that error is near 2^-8 relative, far below K6's, and the format leaves it to the
+engine.
+
+| codebook | tensor name | `codebook` metadata, e.g. |
+|---|---|---|
+| mcg-f16 | `trellis.gate.mcg-f16` | `mcg-f16 0xCBAC1FED, fp16` |
+| mul1-f16 | `trellis.gate.mul1-f16` | `mul1-f16 0x83DCD12D, fp16` |
+| pmcgx-f16 | `trellis.gate.pmcgx-f16` | `pmcgx-f16 V2 L20 0xCBAC1FED 0xBCA14C51, fp16` |
+
+The suffix keeps an E4M3 reader from decoding them as their rounded forms. An engine that computes in FP8 can serve
+an `-f16` codebook only by rounding its values on load, which loses more than an E4M3 encode of the same width, since
+the search never saw the rounded values. It refuses `-f16` codebooks unless its operator asks for that trade. A
+release may use `-f16` codebooks at the widths where they pay off (K4.5 and above) and E4M3 codebooks below, since
+each width file selects its own codebook.
+
+### Mixed codebooks
+
+A trellis file may give each expert its own codebook. Its trellis tensors then take the suffix `.mix`
+(`trellis.gate.mix`, `shared.trellis.down.mix`), every one of them, so a reader without mixed support finds no
+name it knows and refuses the file. Units keep the layout above; only the hash differs between experts. Tiles are
+tail-biting and stand alone, so no state crosses from one expert to the next.
+
+| tensor | dtype | shape | contents |
+|---|---|---|---|
+| `trellis.codebook` | U8 | [E] | codebook id of each routed expert, for all three projections |
+| `shared.trellis.codebook` | U8 | [1] | codebook id of the shared expert, when the file has it |
+
+| metadata | value |
+|---|---|
+| `codebook` | `mix` |
+| `codebooks` | the codebook of each id, in id order, `; ` between them, each as a single-codebook file's `codebook`, e.g. `mcg 0xCBAC1FED, E4M3 rounding; pmcgx V2 L20 0xCBAC1FED 0xBCA14C51, E4M3 rounding` |
+
+Refuse the file if an id has no entry in `codebooks`, or if an expert's id names a codebook you do not implement.
+At a half-integer K every entry must be a pair codebook, and at K6 an `-f16` codebook. The id joins the [expert checksum](#expert-checksum), so a
+unit checked against its checksum is checked against its codebook too.
+
+### Test values
+
+Every value here is an fp16 bit pattern in hex. v is the codebook's fp16 value; the E4M3 column is v rounded to
+E4M3, written back as fp16. The `-f16` codebooks decode to v.
+
+| state | mcg v | mcg E4M3 | mul1 v | mul1 E4M3 |
+|---|---|---|---|---|
+| `0x0000` | `3f60` | `3f80` | `c2e8` | `c300` |
+| `0x0001` | `304e` | `3080` | `3921` | `3900` |
+| `0x1234` | `3e0f` | `3e00` | `b89e` | `b880` |
+| `0x7fff` | `4172` | `4180` | `3fca` | `4000` |
+| `0x8000` | `b915` | `b900` | `baf2` | `bb00` |
+| `0xbeef` | `c293` | `c280` | `3124` | `3100` |
+| `0xffff` | `3acd` | `3b00` | `b936` | `b900` |
+
+| pmcgx state | v₂ₚ | v₂ₚ₊₁ | v₂ₚ E4M3 | v₂ₚ₊₁ E4M3 |
+|---|---|---|---|---|
+| `0x00000` | `3f60` | `3f60` | `3f80` | `3f80` |
+| `0x00001` | `b268` | `34cb` | `b280` | `3500` |
+| `0x12345` | `3e6d` | `c0b4` | `3e80` | `c080` |
+| `0x7ffff` | `c120` | `1e00` | `c100` | `1e00` |
+| `0x80000` | `3ea4` | `395c` | `3e80` | `3980` |
+| `0xbeef5` | `bd2e` | `4070` | `bd00` | `4080` |
+| `0xfffff` | `b9b0` | `ac60` | `b980` | `ac80` |
+
+Whole tables: the sha256 over every state in order, 0 to 2¹⁶ − 1 (pmcgx 2²⁰ − 1). The fp16 table holds each v as a
+little-endian u16 (pmcgx: v₂ₚ, then v₂ₚ₊₁); the E4M3 table holds each rounded value as one E4M3 byte.
+
+| codebook | sha256 of the fp16 table | sha256 of the E4M3 table |
+|---|---|---|
+| mcg | `95383563929baa9d1ae5de0be22490284382673620bdd85929feea7bdbef04a9` | `852259a151b9d7c4d8cc6b7537ba5f548e78681488e926953c04e94b275591b9` |
+| mul1 | `bc48d02cb1c14939dc47b90f870dd689d63e3b1ab69a157e65538db68677a6c8` | `ee3283e85586daec879a03d2cf93b7f33e8f3400b1c2b55e9eb4563f152a45cc` |
+| pmcgx | `c2f33d5515f86e4c296867d9ca4f6871f8c1441248b24410bebc13e49da442a5` | `7f66c49ed68c726cc5b602dc7df7788e06662000893b5fa52d4b042a834be07e` |
+
+Tiles: one tile of 32·K bytes with byte j = (37j + 11) mod 256, decoded through stream, states, codebook, rounding
+and placement to 256 fp32 values, row-major (input, output), little-endian. The sha256 of those 1,024 bytes:
+
+| codebook | K: first 16 hex digits of the sha256 |
+|---|---|
+| mcg | K1 `0f55b1ebabddf3dc` · K2 `8dde4d941e508fa7` · K3 `640c2065964c409d` · K4 `43b9bff37b64f579` · K5 `cc48fcc66caf3a41` |
+| mul1 | K1 `24848da1282fbd70` · K2 `5828c7200d079dad` · K3 `eaa28e21af3b58e2` · K4 `e24c0798dc46e799` · K5 `3d1043cb44bdf76d` |
+| pmcgx | K0.5 `dd6bc537b173f3e8` · K1 `f0c40ae8fe7f23d1` · K1.5 `36a1897a31ccd5d4` · K2 `d5b6cc4ed594469f` · K2.5 `1428ff10cbc4044b` · K3 `d4005af0b8591dc1` · K3.5 `b9898c3e54ae2d7e` · K4 `e407108ab19f224c` · K4.5 `143277248d13e27c` · K5 `c037dde67a1f5de4` |
+| mcg-f16 | K6 `626bfe33614027e1` |
+| mul1-f16 | K6 `173d104e9b4fb44b` |
+| pmcgx-f16 | K5.5 `8d06db3bf149c785` · K6 `b888e32d22699015` |
+
+These match gr8's separate implementation (engine/loader-rs) on every state of each codebook and on random tiles
+at K1-K5 in each codebook. `loader/test_exlr8.py` checks the reference loader against them.
 
 ## Native stores
 
@@ -213,9 +339,9 @@ stored names.
 
 | field | values |
 |---|---|
-| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block |
+| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block, 9 row trellis |
 | 1 out, 2 in | full matrix shape |
-| 3 K | trellis width, else 0 |
+| 3 K | trellis width, else 0; a half-integer K as −2K (−9 for K4.5) |
 | 4 sharded side | 0 replicated, 1 output channels, 2 input channels |
 | 5 channels per sharding unit | 0 if replicated |
 | 6 shared input rotation (trellis) | 0 own; i ≥ 1: entry i of metadata `rotations` (absent: 1 `attn_in`, 2 `q_resid`, 3 `mlp_in`) |
@@ -231,18 +357,55 @@ stored names.
 | 6 BF16 | `bf16` [out, in] | as stored |
 | 7 FP32 | `fp32` [out, in] | as stored |
 | 8 FP8 32×32 block | `fp8` U8, `e8m0` U8; side 2: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
+| 9 row trellis | `rows` U8 [out, in/256 · 32K], `suh` F16 [in], `svh` F16 [out] | see [Row trellis](#row-trellis) |
 
 | file | contents |
 |---|---|
 | `exlr8-dense-LLL` | layer L's matrices and vectors; metadata `layer` |
 | `exlr8-vocab` | `embed_tokens`, `lm_head`, `norm.weight` |
-| `exlr8-extra-NAME` | tensors outside the decoder layers, full HF names |
+| `exlr8-extra-NAME` | tensors outside the decoder layers, full HF names; a matrix under its HF name less `.weight` |
 | `exlr8-split-NAME.pPPP` | `M.record` (full shape) + rows [r0, r1) of M's row-major data tensors + `M.checksum` of those rows (r0 a multiple of 128); metadata `rows` = `r0-r1`, `parts`, and for a layer's matrix `layer` and NAME = `LLL.<stored name>` |
 
 Dense checksum: one U64 per 128-channel block of the sharded side (per 128 output rows if replicated), xxhash64 seed 0
 over that block's rows of each data tensor (int4 side 2: entry b of `q4` then of `s4`; FP8 block: scale row b;
-trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; FP8 32×32 block: rows 128b.. of
-`fp8` ‖ rows 4b..4b+3 of `e8m0`, or entry b of each on side 2).
+trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; row trellis: rows 128b.. of
+`rows` ‖ `svh` of those rows ‖ the whole `suh`; FP8 32×32 block: rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`, or
+entry b of each on side 2).
+
+### Row trellis
+
+For lookup tables such as embeddings, where an engine reads single rows. Each row decodes from its own bytes: the
+rotation runs along the row only, and no tile spans two rows.
+
+Row r is in/256 tiles. Tile t holds the row's values 256t..256t+255 at stream positions 0..255 in order, with no
+tile permutation, decoded through stream, states and codebook as above. With v_r the row's in decoded values,
+
+W[r, c] = suh[c] · (Hb v_r)[c] · svh[r]
+
+where Hb applies the 128 × 128 Hadamard to each run of 128 values, as in the trellis decode. `suh` carries the
+column signs. The record gives sharded side 1 and 1 channel per sharding unit (any row split works), K in field 3,
+and the codebook names `rows` as it names `trellis` (`rows.pmcgx`). A table whose rows hold one 256-value slice per
+layer, as Gemma 4's per-layer embeddings do, reads one tile per layer per token.
+
+### Dense codebooks
+
+A trellis matrix names its codebook as an expert file does: `M.trellis` is mcg, and `M.trellis.<codebook>` names
+any other (`o_proj.trellis.pmcgx`). A file holding any such matrix sets `codebooks` in its metadata: every non-mcg
+codebook its matrices use, `; ` between them, each as a single-codebook file's `codebook`. Refuse a matrix whose
+codebook is missing from `codebooks` or not one you implement, and check its K against the codebook's
+[widths](#widths).
+
+### Dense widths
+
+A trellis matrix may be stored at several widths, so that manifests can choose between them. Each stored width
+then takes the prefix `M.kK.` in place of `M.`: `M.kK.record`, `M.kK.checksum` and `M.kK.trellis[.<codebook>]`,
+`M.kK.suh`, `M.kK.svh`, with K the width name (`q_proj.k2.record`, `q_proj.k3.record`). Record field 3 holds the
+same K. Each width is a separate encode with its own side vectors and may use its own codebook, but every width of
+M has the same shape, sharded side and channels per sharding unit. Such a matrix has no `M.record`.
+
+The manifest's [`dense`](#manifestsexlr8-manifest-namejson) object picks one width for each such matrix. Refuse a
+manifest that leaves one out or names a width the file does not hold. Only `exlr8-dense-LLL` files hold several
+widths. A matrix stored at one width keeps the plain `M.` names, and a manifest gives it no entry.
 
 The vocab file may carry `hf_names`, JSON from its stored names to HF names, when they are not GLM-5.3's.
 
@@ -301,13 +464,31 @@ are vectors, stored as-is. The vision tower and aligner are `exlr8-extra-vision`
 
 | key | value |
 |---|---|
-| `format` | `exlr8-v2-manifest` |
+| `format` | `exlr8-v4-manifest` |
 | `name`, `version`, `set_id`, `rule`, `mtp_layer`, `source`, `changelog` | strings / list |
 | `layers["L"].gate`, `.up` | [E][U] widths per (expert, unit) |
 | `layers["L"].down` | [E] widths, one per expert |
 | `layers["L"].shared` | `{"gate": [U], "up": [U], "down": K}` |
+| `dense["L"]` | `{"<stored name>": K}` for every matrix of `exlr8-dense-LLL` stored at several [widths](#dense-widths); absent when no file has one |
+| `requires` | what an engine needs to serve the manifest, below |
 
-A width is K, or a native store's name.
+A width is K (a JSON number: `4`, `4.5`), or a native store's name.
+
+### requires
+
+The union over every unit and `dense` width the manifest selects, so an engine can refuse a manifest from this one object, before it
+opens an expert file. The files stay authoritative: an engine still resolves each file's tensor names and checks
+each unit as above.
+
+| key | value |
+|---|---|
+| `requires.trellis` | sorted list of `"<width name> <codebook>"`, one per (width, codebook) any selected unit or `dense` width uses, e.g. `["k2 mul1", "k4 mul1", "k4p5 pmcgx"]`; experts of a mixed file count under their own codebooks |
+| `requires.stores` | sorted list of the native stores any selected unit uses (`[]`: none) |
+| `requires.mixing` | `none`: each layer's selected units use one codebook; `width`: some layer's widths use different codebooks, each width one; `expert`: some layer has a mixed file with more than one codebook among its selected experts |
+
+Refuse the manifest if `requires` names a width, codebook, store or mixing level the engine does not serve. Every
+v4 manifest carries `requires`; an `exlr8-v2-manifest` has none, and the engine learns the same from the files,
+layer by layer.
 
 GLM-5.3 names: `bit225` `bit243` `bit260` `bit325` `bit338` (≈ 2.25 … 3.38 routed bits/weight, KL-optimised),
 `down1` / `home` / `up1` (≈ 2.25 / 3.25 / 4.0).
@@ -317,7 +498,7 @@ GLM-5.3 names: `bit225` `bit243` `bit260` `bit325` `bit338` (≈ 2.25 … 3.38 r
 All units rank R owns at TP = N, width K; one tensor set per MoE layer `Lnnn` (e.g. `L040`); n = units owned.
 A native store's slices are `index-slices/tpN/<store>/rankR.safetensors`. They hold `Lnnn.units`, `Lnnn.offset`
 (into the store file) and `Lnnn.checksum` only, and their metadata gives `store` and `unit_bytes` in place of `k` and
-`half_bytes`.
+`half_bytes`. The directory takes the width name, e.g. `index-slices/tp4/k4p5/`.
 
 | tensor | dtype | shape | contents |
 |---|---|---|---|
@@ -327,12 +508,14 @@ A native store's slices are `index-slices/tpN/<store>/rankR.safetensors`. They h
 | `Lnnn.chan` | F16 | [n, 3, 128] | the unit's channel values (gate/up `svh`, down `suh`) |
 | `Lnnn.block` | F16 | [E+1, 3, H/128] | block scales (gate/up `su_block`, down `sv_block`) |
 | `Lnnn.signs` | I8 | [2, H] | `signs.in`, `signs.out` |
+| `Lnnn.codebook` | U8 | [n] | the unit's codebook id; layers whose width file is mixed only |
 
 | metadata | contents |
 |---|---|
 | `tp`, `rank`, `k`, `layers`, `half_bytes`, `rule`, `files` | slice identity |
 | `hidden_size`, `n_routed_experts`, and the other model metadata keys | as in the index files; absent for GLM-5.3 |
 | `layer_experts` | JSON {layer: E} for layers whose E differs from `n_routed_experts` (absent: none) |
+| `codebooks` | JSON {layer: the width file's `codebook`, or its `codebooks` for a mixed file}, every layer |
 | `set_id` | sha256 of lines `"<path> <bytes> <sha256>\n"` over `experts/*` and `dense/*`, sorted by path |
 | `index_sha256` | JSON {layer: sha256 of its index file} |
 | `source` | release name and version |

@@ -11,6 +11,23 @@ GPU, about 340 lines, and follows the byte-level spec in the model card's
 [Loader](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4#loader) section. On the same device its output
 matches exllamav3 0.0.43's decode value for value.
 
+## What it reads
+
+exlr8 v2 and v4 files ([FORMAT.md](../FORMAT.md)): every codebook (mcg, mul1, pmcgx and their `-f16` forms),
+widths K0.5 to K6 including the pmcgx half widths, mixed-codebook width files, native stores, and v4 manifests,
+whose `requires` it checks before it opens an expert file. It refuses a file whose format, codebook or width it does
+not know, and a v4 feature in a file marked `exlr8-v2`.
+
+## Tests
+
+```
+python -m pytest loader/test_exlr8.py
+```
+
+The tests check the codebooks against FORMAT.md's test values, decode tiles at every width both through the loader
+and through a slow bit-by-bit form of the spec's wording, and read a small mixed width file end to end. They need
+`pytest` and `xxhash` as well.
+
 ## Derived from exllamav3
 
 This loader is a derivative of [exllamav3](https://github.com/turboderp-org/exllamav3) by turboderp. The trellis

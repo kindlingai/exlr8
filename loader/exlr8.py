@@ -1,11 +1,11 @@
-# Reference loader for exlr8 v2 checkpoints (GLM-5.3 exlr8 K2/K3/K4).
+# Reference loader for exlr8 v2 and v4 checkpoints (FORMAT.md).
 #
 # This is a derivative of exllamav3 by turboderp (https://github.com/turboderp-org/exllamav3). The trellis
 # codebook, the bit packing, the tile order and the 128x128 Hadamard rotation reproduce exllamav3 0.0.43.
 # MIT licence: Copyright (c) 2025 Turboderp. See LICENSE in this directory.
 #
 # Pure PyTorch, CPU or GPU, written for clarity and checking rather than speed.
-"""Decode exlr8 v2 weights into HF tensors (GLM-5.3, or the model the files' metadata names).
+"""Decode exlr8 v2 and v4 weights into HF tensors (GLM-5.3, or the model the files' metadata names).
 
     python -m loader.exlr8 DIR --manifest home --layer 40 [--out layer40.safetensors] [--verify] [--raw]
 
@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import os
+import re
 import struct
 
 import torch
@@ -29,14 +30,22 @@ PROJS = ("gate", "up", "down")
 NATIVE = {"mxfp4": (2, (1, 32)), "fp8b32": (1, (32, 32))}
 E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
 MCG = 0xCBAC1FED
+MCG2 = 0xBCA14C51               # pmcgx's second multiplier
 MUL1 = 0x83DCD12D
 # mul1's scale and offset, exactly the fp16 bit patterns the kernel holds: v = fp16(1024 + byte_sum) * C + D.
 C_MUL1 = 0.00676727294921875    # fp16 0x1EEE
 D_MUL1 = -10.3828125            # fp16 0xC931
-TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32 = 1, 2, 3, 4, 5, 6, 7, 8     # record field 0
+# The trellis codebooks (FORMAT.md "Codebook"): name -> (state bits, multipliers its `codebook` metadata must name).
+# Each has an -f16 form with the same hash and no E4M3 rounding.
+CODEBOOKS = {"mcg": (16, ("0xCBAC1FED",)), "mul1": (16, ("0x83DCD12D",)), "pmcgx": (20, ("0xCBAC1FED", "0xBCA14C51"))}
+CODEBOOKS.update({f"{k}-f16": v for k, v in list(CODEBOOKS.items())})
+FORMATS = ("exlr8-v2", "exlr8-v4")
+MIXING = ("none", "width", "expert")
+TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS = 1, 2, 3, 4, 5, 6, 7, 8, 9  # record field 0
 IN = 2                                  # record field 4: 0 replicated, 1 output side, 2 input side
 DATA = {TRELLIS: ("trellis", "suh", "svh"), INT4: ("q4", "s4"), MXFP8: ("fp8", "e8m0"), FP8_BLOCK: ("fp8", "scale"),
-        FP8_ROW: ("fp8", "scale"), BF16: ("bf16",), FP32: ("fp32",), FP8_B32: ("fp8", "e8m0")}     # in checksum order
+        FP8_ROW: ("fp8", "scale"), BF16: ("bf16",), FP32: ("fp32",), FP8_B32: ("fp8", "e8m0"),
+        ROWS: ("rows", "svh", "suh")}     # in checksum order
 DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I64": torch.int64,
           "I32": torch.int32, "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8, "U64": torch.int64}
 ST_NAMES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32", torch.int64: "I64",
@@ -103,66 +112,106 @@ def tile_perm():
     return torch.tensor(perm)
 
 
-def codebook(states, name="mcg"):
-    """16-bit trellis states -> fp32 weights: the file's codebook, then E4M3 rounding (round to nearest even,
-    saturating). The rounding is part of the format. The codebook comes from the trellis tensor name: bare for
-    mcg, suffixed otherwise."""
-    if name == "mcg":
-        x = ((states & 0xFFFF) * MCG) & 0xFFFFFFFF
-        x = (x & 0x8FFF8FFF) ^ 0x3B603B60
+def is_pair(cb):
+    """pmcgx and pmcgx-f16: one 20-bit state per pair of weights, 2K new bits per state."""
+    return cb.removesuffix("-f16") == "pmcgx"
 
-        def fp16(v):
-            return ((v ^ 0x8000) - 0x8000).to(torch.int16).view(torch.float16)
-        v = (fp16(x & 0xFFFF) + fp16(x >> 16)).float()
-    elif name == "mul1":
+
+def check_width(K, cb):
+    """Raises ValueError unless codebook cb has width K (FORMAT.md "Widths")."""
+    top = 6 if cb.endswith("-f16") else 5
+    low, step = (0.5, 0.5) if is_pair(cb) else (1, 1)
+    if not (low <= K <= top and (K / step) == int(K / step)):
+        raise ValueError(f"codebook {cb} has no width K{K}")
+
+
+def width_name(K):
+    """k4, or k4p5 for K = 4.5 (FORMAT.md "Symbols")."""
+    return f"k{int(K)}" + ("p5" if K != int(K) else "")
+
+
+def _fp16(v):
+    """16-bit patterns in an int64 tensor -> float16"""
+    return ((v ^ 0x8000) - 0x8000).to(torch.int16).view(torch.float16)
+
+
+def _mask(x):
+    """mcg's lop3: two fp16 halves in [0.125, 2) from a 32-bit product"""
+    return (x & 0x8FFF8FFF) ^ 0x3B603B60
+
+
+def codebook_f16(states, cb="mcg"):
+    """Trellis states -> the codebook's fp16 values, before any rounding. mcg and mul1 take 16-bit states and give one
+    value each; pmcgx takes 20-bit pair states and gives [..., 2], the values of weights 2p and 2p + 1. The -f16
+    forms hash the same way."""
+    name = cb.removesuffix("-f16")
+    if name == "mcg":
+        x = _mask(((states & 0xFFFF) * MCG) & 0xFFFFFFFF)
+        return _fp16(x & 0xFFFF) + _fp16(x >> 16)
+    if name == "mul1":
         x = ((states & 0xFFFF) * MUL1) & 0xFFFFFFFF
         byte_sum = sum((x >> shift) & 0xFF for shift in (0, 8, 16, 24))
         # fp16 0x6400 is 1024.0 and the binade's ulp is 1, so 1024 + byte_sum is exact. The kernel's fused
         # multiply-add rounds once: double here, then fp16, gives the same bits.
-        v = ((1024 + byte_sum).double() * C_MUL1 + D_MUL1).half().float()
-    else:
-        raise ValueError(f"unknown codebook {name!r}")
+        return ((1024 + byte_sum).double() * C_MUL1 + D_MUL1).half()
+    if name == "pmcgx":
+        w = states & 0xFFFFF
+        x1, x2 = _mask((w * MCG) & 0xFFFFFFFF), _mask((w * MCG2) & 0xFFFFFFFF)
+        # the halves cross: weight 2p is x1's low half plus x2's high half
+        return torch.stack([_fp16(x1 & 0xFFFF) + _fp16(x2 >> 16), _fp16(x1 >> 16) + _fp16(x2 & 0xFFFF)], -1)
+    raise ValueError(f"unknown codebook {cb!r}")
+
+
+def codebook(states, cb="mcg"):
+    """Trellis states -> fp32 weights: the codebook's fp16 values, then, for every codebook but the -f16 forms, E4M3
+    rounding (round to nearest even, saturating)."""
+    v = codebook_f16(states, cb).float()
+    if cb.endswith("-f16"):
+        return v
     # IMPORTANT: round to E4M3 here, even when the output is BF16 or FP32. The encoder rounded every codebook value
     # to E4M3 inside its Viterbi search, so the stored states are the best choice for the rounded values, not the
     # fp16 ones. Skipping the rounding decodes different weights (+2.3% error in the README's measurement).
     return v.clamp(-448, 448).to(torch.float8_e4m3fn).float()
 
 
-def file_codebook(f):
-    """A trellis file's codebook, from its tensor names: `trellis.gate` is mcg, `trellis.gate.mul1` is mul1.
+def tile_bits(raw, K):
+    """Packed tiles, uint8 [n, 32K] -> each tile's 256K stream bits, int64 [n, 256K]: int16 words, the two words of
+    each pair swapped, bits MSB first."""
+    n, nw = raw.shape[0], int(16 * K)
+    b = raw.reshape(n, nw, 2).long()
+    words = (b[..., 0] | (b[..., 1] << 8)).reshape(n, nw // 2, 2).flip(-1).reshape(n, nw)
+    return ((words.unsqueeze(-1) >> torch.arange(15, -1, -1, device=raw.device)) & 1).reshape(n, 16 * nw)
 
-    Raises ValueError if the file mixes codebooks, which no writer produces.
-    """
-    found = {n.rsplit(".", 1)[1] for n in f.names() if "trellis." in n} - set(PROJS)
-    if len(found) > 1:
-        raise ValueError(f"trellis file mixes codebooks {sorted(found)}")
-    return found.pop() if found else "mcg"
+
+def ring_states(bits, ends, width):
+    """The width-bit states whose last bit is at stream bit ends - 1, reading the stream as a ring (tail-biting)."""
+    idx = (ends.unsqueeze(1) - width + torch.arange(width, device=bits.device)) % bits.shape[1]
+    return (bits[:, idx] << torch.arange(width - 1, -1, -1, device=bits.device)).sum(-1)
 
 
 def decode_tiles(raw, K, cb="mcg"):
-    """Packed tiles, uint8 [n, 32K] -> fp32 [n, 16, 16], (input, output) within each tile."""
-    n = raw.shape[0]
-    b = raw.reshape(n, 16 * K, 2).long()
-    words = (b[..., 0] | (b[..., 1] << 8)).reshape(n, 8 * K, 2).flip(-1).reshape(n, 16 * K)
-    bits = (words.unsqueeze(-1) >> torch.arange(15, -1, -1, device=raw.device)) & 1        # MSB first
-    vals = (bits.reshape(n, 256, K) << torch.arange(K - 1, -1, -1, device=raw.device)).sum(-1)
-    states = torch.zeros_like(vals)
-    for j in range(-(-16 // K)):                     # tail-biting: the 16 bits that end with value i
-        states |= torch.roll(vals, j, dims=1) << (j * K)
-    out = torch.empty(n, 256, device=raw.device)
-    out[:, tile_perm().to(raw.device)] = codebook(states, cb)
+    """Packed tiles, uint8 [n, 32K] -> fp32 [n, 16, 16], (input, output) within each tile. K may be a half-integer
+    for a pair codebook."""
+    n, dev = raw.shape[0], raw.device
+    bits = tile_bits(raw, K)
+    if is_pair(cb):         # pair p: the 20 bits ending at bit 2K(p + 1)
+        vals = codebook(ring_states(bits, (torch.arange(128, device=dev) + 1) * int(2 * K), 20), cb).reshape(n, 256)
+    else:                   # value i: the 16 bits ending at bit K(i + 1)
+        vals = codebook(ring_states(bits, (torch.arange(256, device=dev) + 1) * int(K), 16), cb)
+    out = torch.empty(n, 256, device=dev)
+    out[:, tile_perm().to(dev)] = vals
     return out.view(n, 16, 16)
 
 
 def tiles_out_major(raw, K, rows, cols, cb="mcg"):
     """A run of tiles stored [k16][c = 0..7] (gate/up halves, dense entries on the output side) -> (rows, 128)."""
-    return decode_tiles(raw.view(-1, 32 * K), K, cb).view(rows // 16, cols // 16, 16, 16) \
+    return decode_tiles(raw.view(-1, int(32 * K)), K, cb).view(rows // 16, cols // 16, 16, 16) \
         .permute(0, 2, 1, 3).reshape(rows, cols)
 
 
 def tiles_in_major(raw, K, cols, cb="mcg"):
     """A run of tiles stored [b][r = 0..7][c = 0..7] (down halves, dense entries on the input side) -> (128, cols)."""
-    return decode_tiles(raw.view(-1, 32 * K), K, cb).view(cols // 128, 8, 8, 16, 16) \
+    return decode_tiles(raw.view(-1, int(32 * K)), K, cb).view(cols // 128, 8, 8, 16, 16) \
         .permute(1, 3, 0, 2, 4).reshape(128, cols)
 
 
@@ -201,8 +250,59 @@ def model_meta(meta):
     return m
 
 
+def parse_width(text):
+    """A width as written in metadata: 4 or 4.5."""
+    k = float(text)
+    return int(k) if k == int(k) else k
+
+
 def _widths(text):
-    return [int(k) for k in text.split(",") if k]
+    return [parse_width(k) for k in text.split(",") if k]
+
+
+def check_codebook_text(name, text):
+    """Raises ValueError unless name is a codebook this loader decodes and text (its `codebook` metadata) starts
+    with it and names its multipliers."""
+    if name not in CODEBOOKS:
+        raise ValueError(f"codebook {name!r} is not one of {sorted(CODEBOOKS)}")
+    first = text.replace(",", " ").split()[0] if text.strip() else ""
+    missing = [m for m in CODEBOOKS[name][1] if m.lower() not in text.lower()]
+    if first != name or missing:
+        raise ValueError(f"codebook metadata {text!r} does not name {name} and its multipliers")
+
+
+def file_codebook(f):
+    """A trellis file's codebook, from its tensor names: `trellis.gate` is mcg, `trellis.gate.<codebook>` names it,
+    and `trellis.gate.mix` marks a mixed file ("mix"). Checks the `codebook` metadata against the names."""
+    found = set()
+    for n in f.names():
+        parts = n.removeprefix("shared.").split(".")
+        if parts[0] == "trellis" and parts[1] in PROJS:
+            found.add(parts[2] if len(parts) > 2 else "mcg")
+    if len(found) != 1:
+        raise ValueError(f"{f.path}: trellis tensors name codebooks {sorted(found)}")
+    cb = found.pop()
+    text = f.meta.get("codebook")
+    if cb == "mix":
+        if text != "mix":
+            raise ValueError(f"{f.path}: .mix tensors, but metadata codebook {text!r}")
+    elif cb in CODEBOOKS:
+        if text is not None or cb != "mcg":     # mcg files written before the other codebooks carry none
+            check_codebook_text(cb, text or "")
+    else:
+        raise ValueError(f"{f.path}: codebook {cb!r} is not one of {sorted(CODEBOOKS)}")
+    return cb
+
+
+def mixed_codebooks(f):
+    """A mixed file's codebook names in id order, from its `codebooks` metadata."""
+    names = []
+    for entry in f.meta["codebooks"].split(";"):
+        entry = entry.strip()
+        name = entry.replace(",", " ").split()[0]
+        check_codebook_text(name, entry)
+        names.append(name)
+    return names
 
 
 def _stores(text):
@@ -240,16 +340,31 @@ class ExpertLayer:
         self.H, self.U = self.m["hidden_size"], self.m["moe_intermediate_size"] // 128
         self.E = self.m["n_routed_experts"]
         meta = self.index.meta
+        check_format(self.index)
         self.widths = _widths(meta["widths"]) + _stores(meta.get("stores"))
         self.shared_widths = _widths(meta["shared_widths"]) + _stores(meta.get("shared_stores"))
         self.files = {}
         self.base = base
 
     def trellis_file(self, K):
-        """(file, codebook) for width K."""
+        """(file, codebook, mixed) for width K: mixed is None, or for a mixed file {"names": codebook by id,
+        "": routed ids [E], "shared.": the shared expert's id [1]}."""
         if K not in self.files:
-            f = SafeFile(f"{self.base}.k{K}.safetensors")
-            self.files[K] = (f, file_codebook(f))
+            f = SafeFile(f"{self.base}.{width_name(K)}.safetensors")
+            v4 = check_format(f) == "exlr8-v4"
+            cb = file_codebook(f)
+            mixed = None
+            if cb == "mix":
+                mixed = {"names": mixed_codebooks(f)}
+                for pre in ("", "shared."):
+                    if f"{pre}trellis.codebook" in f.header:
+                        ids = f.get(f"{pre}trellis.codebook")
+                        if int(ids.max()) >= len(mixed["names"]):
+                            raise ValueError(f"{f.path}: {pre}trellis.codebook has an id with no codebook")
+                        mixed[pre] = ids
+            if not v4 and (mixed or cb.endswith("-f16") or K not in (2, 3, 4)):
+                raise ValueError(f"{f.path}: a v4 feature (width K{K}, codebook {cb}) in an exlr8-v2 file")
+            self.files[K] = (f, cb, mixed)
         return self.files[K]
 
     def native_raw(self, e, p, h, store, verify=False):
@@ -279,9 +394,18 @@ class ExpertLayer:
         if isinstance(K, str):
             codes, scales = split_native(self.native_raw(e, p, h, K, verify).to(self.device), K, p, self.H)
             return decode_native(codes, scales, K).T
-        k = f"{pre}k{K}."
+        k = f"{pre}{width_name(K)}."
         off, length = (int(v) for v in self.t[k + "index"][j, PROJS.index(p), h])
-        f, cb = self.trellis_file(K)
+        f, cb, mixed = self.trellis_file(K)
+        name = f"{pre}trellis.{p}" + ("" if cb == "mcg" else "." + cb)
+        a, b = (f.start + x for x in f.header[name]["data_offsets"])
+        if not (a <= off and off + length <= b and length == int(16 * K * self.H)):
+            raise ValueError(f"{f.path}: layer {self.L} expert {e} {p} unit {h} lies outside {name}")
+        extra = []
+        if mixed:           # the expert's own codebook; its id joins the checksum
+            cid = int(mixed[pre][j])
+            cb, extra = mixed["names"][cid], [torch.tensor([cid], dtype=torch.uint8)]
+        check_width(K, cb)
         raw = f.read(off, length)
         c = slice(128 * h, 128 * h + 128)
         if p == "down":
@@ -290,7 +414,7 @@ class ExpertLayer:
             chan, block = self.t[k + f"{p}.svh"][j, c], self.t[k + f"{p}.su_block"][j]
         if verify:
             want = int(self.t[k + "checksum"][j, PROJS.index(p), h]) & (2 ** 64 - 1)
-            got = xxh64(raw, chan, block)
+            got = xxh64(raw, chan, block, *extra)
             if got != want:
                 raise ValueError(f"layer {self.L} expert {e} {p} half {h} K{K}: checksum {got:#x}, expected {want:#x}")
         raw, chan, block = raw.to(self.device), chan.to(self.device), block.float().to(self.device)
@@ -320,16 +444,29 @@ class ExpertLayer:
 
 # ---------------------------------------------------------------- dense and vocabulary
 
-def decode_dense(rec, t, device="cpu"):
-    """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored."""
+def decode_dense(rec, t, device="cpu", cb="mcg"):
+    """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored, with
+    a trellis matrix's data under `trellis` whatever its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
+    K = K if K >= 0 else -K / 2      # a half width is written as -2K
     t = {k: v.to(device) for k, v in t.items()}
+    if fmt == ROWS:         # tile t of row r: values 256t.. in stream order, rotated along the row only
+        check_width(K, cb)
+        w, perm, had = torch.empty(out, inp, device=device), tile_perm().to(device), hadamard(128, device)
+        suh, svh = t["suh"].float().unsqueeze(0), t["svh"].float().unsqueeze(1)
+        for r in range(0, out, 4096):    # bounds decode_tiles' scratch, tens of bytes a value
+            rows = t["rows"][r:r + 4096]
+            n = rows.shape[0] * inp // 256
+            v = decode_tiles(rows.reshape(n, int(32 * K)), K, cb).view(n, 256)[:, perm]
+            w[r:r + rows.shape[0]] = (v.reshape(-1, 128) @ had).view(-1, inp) * suh * svh[r:r + rows.shape[0]]
+        return w
     if fmt == TRELLIS:
+        check_width(K, cb)
         ent = t["trellis"]
         if side == IN:      # entry g = input rows 128g.., tiles as down halves
-            T = torch.cat([tiles_in_major(ent[g], K, out) for g in range(ent.shape[0])], 0)
+            T = torch.cat([tiles_in_major(ent[g], K, out, cb) for g in range(ent.shape[0])], 0)
         else:               # entry g = output columns 128g.., tiles as gate/up halves
-            T = torch.cat([tiles_out_major(ent[g], K, inp, 128) for g in range(ent.shape[0])], 1)
+            T = torch.cat([tiles_out_major(ent[g], K, inp, 128, cb) for g in range(ent.shape[0])], 1)
         return reconstruct(T, t["suh"], t["svh"]).T
     if fmt == INT4:
         q4, s4 = t["q4"], t["s4"]
@@ -368,6 +505,8 @@ def dense_checksums(rec, t):
         if fmt == TRELLIS:
             own, other = ("suh", "svh") if side == IN else ("svh", "suh")
             parts = [t["trellis"][b], t[own][r], t[other]]
+        elif fmt == ROWS:
+            parts = [t["rows"][r], t["svh"][r], t["suh"]]
         elif fmt in (INT4, FP8_B32) and side == IN:
             parts = [t[k][b] for k in DATA[fmt]]
         elif fmt == FP8_B32:
@@ -380,21 +519,71 @@ def dense_checksums(rec, t):
     return sums
 
 
-def load_matrices(f, prefix, dtype, device, verify, raw=False):
-    """Every tensor of a dense or vocabulary file: matrices decoded (by their records), vectors as stored. With raw,
-    FP8 32x32 block matrices come back as the source's (weight, scale), MXFP8 as (weight, scale) too, and BF16 as
-    stored."""
-    names = f.names()
-    mats = [n[:-len(".record")] for n in names if n.endswith(".record")]
-    out, owned = {}, set()
-    for m in mats:
-        rec = f.get(m + ".record")
-        t = {s: f.get(f"{m}.{s}") for s in DATA[int(rec[0])]}
-        if verify:
-            want = [int(v) & (2 ** 64 - 1) for v in f.get(m + ".checksum")]
-            if dense_checksums(rec, t) != want:
-                raise ValueError(f"{f.path}: {m} checksum mismatch")
+def dense_matrices(f, widths=None):
+    """{stored name: (base, codebook, {data suffix: tensor name})} for every matrix of a dense or vocabulary file,
+    and the set of every tensor name a matrix owns, unpicked widths included. base prefixes the matrix's tensors: `M`,
+    or `M.kK` for a matrix stored at several widths (FORMAT.md "Dense widths"), K picked by widths, {stored name: K}
+    from the manifest's `dense` object."""
+    names = set(f.names())
+    stored = {}
+    for n in names:
+        if not n.endswith(".record"):
+            continue
+        base = n[:-len(".record")]
+        m, _, w = base.rpartition(".")
+        if m and re.fullmatch(r"k\d+(p5)?", w) and f"{m}.record" not in names:
+            stored.setdefault(m, {})[w] = base
+        else:
+            stored[base] = {None: base}
+    widths = widths or {}
+    extra = set(widths) - {m for m, ws in stored.items() if None not in ws}
+    if extra:
+        raise ValueError(f"{f.path}: the manifest picks widths for {sorted(extra)}, which have one width")
+    texts = [x.strip() for x in f.meta.get("codebooks", "").split(";") if x.strip()]
+    listed = {x.replace(",", " ").split()[0]: x for x in texts}
+
+    def tensors(base):
+        """base's codebook and {data suffix: tensor name}, checked against the `codebooks` metadata."""
+        fmt = int(f.get(base + ".record")[0])
+        codes = "rows" if fmt == ROWS else "trellis"
+        found = [n[len(f"{base}.{codes}."):] for n in names if n.startswith(f"{base}.{codes}.")]
+        cb = found[0] if found else "mcg"
+        if found and (len(found) > 1 or cb not in listed):
+            raise ValueError(f"{f.path}: {base} names codebooks {found}, metadata codebooks lists {sorted(listed)}")
+        if found:
+            check_codebook_text(cb, listed[cb])
+        return cb, {s: f"{base}.{s}.{cb}" if s == codes and found else f"{base}.{s}" for s in DATA[fmt]}
+
+    mats, owned = {}, set()
+    for m, ws in stored.items():
+        for base in ws.values():
+            owned.update([base + ".record", base + ".checksum", *tensors(base)[1].values()])
+        if None in ws:
+            base = ws[None]
+        elif m not in widths:
+            raise ValueError(f"{f.path}: {m} is stored at {sorted(ws)} and the manifest picks none")
+        elif width_name(widths[m]) not in ws:
+            raise ValueError(f"{f.path}: the manifest picks {width_name(widths[m])} for {m}, stored at {sorted(ws)}")
+        else:
+            base = ws[width_name(widths[m])]
+        mats[m] = (base, *tensors(base))
+    return mats, owned
+
+
+def load_matrices(f, prefix, dtype, device, verify, raw=False, widths=None):
+    """Every tensor of a dense or vocabulary file: matrices decoded (by their records), vectors as stored. widths:
+    the manifest's `dense` entry for this file. With raw, FP8 32x32 block matrices come back as the source's
+    (weight, scale), MXFP8 as (weight, scale) too, and BF16 as stored."""
+    mats, owned = dense_matrices(f, widths)
+    out = {}
+    for m, (base, cb, data) in mats.items():
+        rec = f.get(base + ".record")
         fmt, side = int(rec[0]), int(rec[4])
+        t = {s: f.get(n) for s, n in data.items()}
+        if verify:
+            want = [int(v) & (2 ** 64 - 1) for v in f.get(base + ".checksum")]
+            if dense_checksums(rec, t) != want:
+                raise ValueError(f"{f.path}: {base} checksum mismatch")
         if raw and fmt in (FP8_B32, MXFP8):
             q, s = fp8_b32_rows(t, side) if fmt == FP8_B32 else (t["fp8"], t["e8m0"])
             out[prefix(m) + ".weight"] = q.view(torch.float8_e4m3fn)
@@ -402,9 +591,8 @@ def load_matrices(f, prefix, dtype, device, verify, raw=False):
         elif raw and fmt == BF16:
             out[prefix(m) + ".weight"] = t["bf16"]
         else:
-            out[prefix(m) + ".weight"] = decode_dense(rec, t, device).to(dtype).cpu()
-        owned.update(f"{m}.{s}" for s in ("record", "checksum") + DATA[int(rec[0])])
-    for n in names:
+            out[prefix(m) + ".weight"] = decode_dense(rec, t, device, cb).to(dtype).cpu()
+    for n in f.names():
         if n not in owned:
             out[prefix(n)] = f.get(n)
     return out
@@ -423,10 +611,46 @@ def xxh64(*parts):
 
 # ---------------------------------------------------------------- layers
 
+def check_format(f):
+    """A safetensors file's `format`, refused unless this loader reads it."""
+    fmt = f.meta.get("format")
+    if fmt not in FORMATS:
+        raise ValueError(f"{f.path}: format {fmt!r} is not one of {FORMATS}")
+    return fmt
+
+
+def check_requires(manifest):
+    """Refuses a v4 manifest whose `requires` names a width, codebook, store or mixing level this loader does not
+    decode, from that object alone (FORMAT.md "requires"). A v2 manifest has no `requires`."""
+    fmt = manifest.get("format")
+    if fmt == "exlr8-v2-manifest":
+        return
+    if fmt != "exlr8-v4-manifest":
+        raise ValueError(f"manifest format {fmt!r} is not exlr8-v2-manifest or exlr8-v4-manifest")
+    req = manifest.get("requires")
+    if req is None:
+        raise ValueError("a v4 manifest without requires")
+    for item in req["trellis"]:
+        wname, cb = item.split()
+        if cb not in CODEBOOKS:
+            raise ValueError(f"requires {item!r}: codebook {cb} is not one of {sorted(CODEBOOKS)}")
+        K = parse_width(wname.removeprefix("k").replace("p5", ".5"))
+        if width_name(K) != wname:
+            raise ValueError(f"requires {item!r}: {wname} is not a width name")
+        check_width(K, cb)
+    for store in req["stores"]:
+        if store not in NATIVE:
+            raise ValueError(f"requires store {store!r}, not one of {sorted(NATIVE)}")
+    if req["mixing"] not in MIXING:
+        raise ValueError(f"requires mixing {req['mixing']!r}, not one of {MIXING}")
+
+
 def load_manifest(root, name):
     path = name if os.path.isfile(name) else os.path.join(root, "manifests", f"exlr8-manifest-{name}.json")
     with open(path) as f:
-        return json.load(f)
+        m = json.load(f)
+    check_requires(m)
+    return m
 
 
 def load_layer(root, manifest, L, dtype=torch.bfloat16, device="cpu", verify=False, raw=False):
@@ -434,7 +658,8 @@ def load_layer(root, manifest, L, dtype=torch.bfloat16, device="cpu", verify=Fal
     store come back as the source's (weight, scale)."""
     f = SafeFile(os.path.join(root, "dense", f"exlr8-dense-{L:03d}.safetensors"))
     pre = f.meta.get("hf_prefix") or f"{f.meta.get('tensor_prefix', GLM53['tensor_prefix'])}{L}."
-    out = load_matrices(f, lambda n: pre + n, dtype, device, verify, raw)
+    widths = manifest.get("dense", {}).get(str(L))
+    out = load_matrices(f, lambda n: pre + n, dtype, device, verify, raw, widths)
     m = manifest["layers"].get(str(L))
     if m is None:                    # a dense MLP layer: no experts
         return out
@@ -464,7 +689,7 @@ def load_vocab(root, dtype=torch.bfloat16, device="cpu", verify=False, raw=False
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Decode one exlr8 v2 layer into HF tensors.")
+    ap = argparse.ArgumentParser(description="Decode one exlr8 v2 or v4 layer into HF tensors.")
     ap.add_argument("dir", help="the release directory (experts/, dense/, manifests/)")
     ap.add_argument("--manifest", default="home",
                     help="home, down1, up1, bit225, bit243, bit260, bit325, bit338, or a manifest file")
