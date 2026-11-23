@@ -31,7 +31,7 @@ A pure-PyTorch reference loader for the format is in [`loader/`](loader/). Every
 
 The provider based Python fileset writer is in [`exlr8writer/`](exlr8writer/). It connects to a caller's checkpoint or quantization workflow through a small layer data hook.
 
-The site/encoder HTTP protocol is specified in [`protocol/`](protocol/), the single-slot piece file format (`exlr8-v2-job`) in [PIECE.md](PIECE.md), and the calibration Hessian and held-out input files in [HESSIAN.md](HESSIAN.md).
+The single-slot piece file format (`exlr8-v2-job`) is specified in [PIECE.md](PIECE.md), and the calibration Hessian and held-out input files in [HESSIAN.md](HESSIAN.md) (with JSON Schemas for their safetensors headers in [`schemas/`](schemas/)). The site/encoder HTTP protocol is served as an OpenAPI 3.1 specification by the quant site itself (`https://campfire.kindlingai.dev/api/v1/openapi.json`, source in `kindlingai/exlr8quant` `site/openapi/v1.json`).
 
 ---
 

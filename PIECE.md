@@ -1,10 +1,10 @@
 # exlr8 piece file format (`exlr8-v2-job`)
 
-A **piece** is the safetensors file an encoder uploads for one claimed `(job, layer, expert)` slot under the [site/encoder protocol](protocol/README.md). It holds one expert's encoded trellis tiles and side vectors at every width required by the layer plan, plus the layer's shared sign vectors and encoding provenance.
+A **piece** is the safetensors file an encoder uploads for one claimed `(job, layer, expert)` slot under the quant site's HTTP protocol (OpenAPI 3.1 v1 spec served at `https://campfire.kindlingai.dev/api/v1/openapi.json`, source in `kindlingai/exlr8quant` `site/openapi/v1.json`). It holds one expert's encoded trellis tiles and side vectors at every width required by the layer plan, plus the layer's shared sign vectors and encoding provenance.
 
 A release assembler (`exlr8writer`) later packs every layer's pieces into the release files specified in [`FORMAT.md`](FORMAT.md). A job feeder independently decodes each piece and checks its quantization error against the original weights and Hessians before closing the slot.
 
-Structural JSON Schema for the piece header: [`protocol/schemas/piece-header.schema.json`](protocol/schemas/piece-header.schema.json).
+Structural JSON Schema for the piece header: [`schemas/piece-header.schema.json`](schemas/piece-header.schema.json).
 
 ## Symbols
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/hess-dense-header.schema.json",
+  "$id": "https://kindlingai.dev/schemas/exlr8/v1/hess-dense-header.schema.json",
   "title": "Dense / shared Hessian safetensors JSON header (hess-LLL-dense.safetensors)",
   "description": "Structural schema for the JSON header of hess-LLL-dense.safetensors, hess-LLL-dense-heldout.safetensors, and site-synthesized hess-LLL-shared.safetensors (HESSIAN.md). Cross-field checks (contiguous offsets, exact file size, square matrix dimensions, count_<name> pairing, and shared_down_in presence when shared_expert is true) are specified in HESSIAN.md.",
   "type": "object",
@@ -18,7 +18,7 @@
           "minLength": 1
         },
         "weights_id": {
-          "$ref": "common.schema.json#/$defs/Sha256Hex"
+          "$ref": "#/$defs/Sha256Hex"
         },
         "layer": {
           "type": "string",
@@ -56,6 +56,10 @@
     "$ref": "#/$defs/DenseMatrix"
   },
   "$defs": {
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "DataOffsets": {
       "type": "array",
       "prefixItems": [
@@ -69,9 +73,7 @@
       "type": "object",
       "required": ["dtype", "shape", "data_offsets"],
       "properties": {
-        "dtype": {
-          "const": "F32"
-        },
+        "dtype": { "const": "F32" },
         "shape": {
           "type": "array",
           "prefixItems": [
@@ -81,9 +83,7 @@
           "minItems": 2,
           "maxItems": 2
         },
-        "data_offsets": {
-          "$ref": "#/$defs/DataOffsets"
-        }
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
       },
       "additionalProperties": false
     },
@@ -91,9 +91,7 @@
       "type": "object",
       "required": ["dtype", "shape", "data_offsets"],
       "properties": {
-        "dtype": {
-          "const": "I64"
-        },
+        "dtype": { "const": "I64" },
         "shape": {
           "type": "array",
           "prefixItems": [
@@ -102,9 +100,7 @@
           "minItems": 1,
           "maxItems": 1
         },
-        "data_offsets": {
-          "$ref": "#/$defs/DataOffsets"
-        }
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
       },
       "additionalProperties": false
     }

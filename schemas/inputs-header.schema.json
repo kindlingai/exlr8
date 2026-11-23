@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/inputs-header.schema.json",
+  "$id": "https://kindlingai.dev/schemas/exlr8/v1/inputs-header.schema.json",
   "title": "Held-out expert inputs safetensors JSON header (inputs-LLL.safetensors)",
   "description": "Structural schema for the JSON header of inputs-LLL.safetensors (HESSIAN.md). Cross-field checks (contiguous offsets, exact file size, matching n_tok across x/topk_idx/topk_w, matching top_k across topk_idx/topk_w, and x.shape[1] == H) are specified in HESSIAN.md.",
   "type": "object",
@@ -15,7 +15,7 @@
           "minLength": 1
         },
         "weights_id": {
-          "$ref": "common.schema.json#/$defs/Sha256Hex"
+          "$ref": "#/$defs/Sha256Hex"
         },
         "layer": {
           "type": "string",
@@ -30,18 +30,16 @@
         "type": "string"
       }
     },
-    "x": {
-      "$ref": "#/$defs/MatrixBF16"
-    },
-    "topk_idx": {
-      "$ref": "#/$defs/MatrixI32"
-    },
-    "topk_w": {
-      "$ref": "#/$defs/MatrixF32"
-    }
+    "x": { "$ref": "#/$defs/MatrixBF16" },
+    "topk_idx": { "$ref": "#/$defs/MatrixI32" },
+    "topk_w": { "$ref": "#/$defs/MatrixF32" }
   },
   "additionalProperties": false,
   "$defs": {
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "DataOffsets": {
       "type": "array",
       "prefixItems": [

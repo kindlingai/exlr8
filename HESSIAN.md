@@ -1,6 +1,6 @@
 # exlr8 Hessian and held-out input file format
 
-This specification defines the calibration safetensors files produced by a BF16 calibration forward pass (`calib_forward*.py`), staged in a job's Hessian store for volunteer encoders ([`protocol/`](protocol/README.md)), and kept locally by the job owner for held-out piece verification:
+This specification defines the calibration safetensors files produced by a BF16 calibration forward pass (`calib_forward*.py`), staged in a job's Hessian store for volunteer encoders (HTTP protocol OpenAPI 3.1 v1 spec served at `https://campfire.kindlingai.dev/api/v1/openapi.json`, source in `kindlingai/exlr8quant` `site/openapi/v1.json`), and kept locally by the job owner for held-out piece verification:
 
 - Routed expert Hessians: `hess-LLL-eAAA-BBB.safetensors` (and single-expert `hess-LLL-eEEE-EEE.safetensors` synthesized by the site).
 - Layer dense / shared Hessians: `hess-LLL-dense.safetensors` (plus optional `hess-LLL-dense-heldout.safetensors` and site-synthesized `hess-LLL-shared.safetensors`).
@@ -8,11 +8,11 @@ This specification defines the calibration safetensors files produced by a BF16 
 
 Structural JSON Schemas (Draft 2020-12) for the safetensors headers:
 
-- [`protocol/schemas/hess-expert-header.schema.json`](protocol/schemas/hess-expert-header.schema.json)
-- [`protocol/schemas/hess-dense-header.schema.json`](protocol/schemas/hess-dense-header.schema.json)
-- [`protocol/schemas/inputs-header.schema.json`](protocol/schemas/inputs-header.schema.json)
+- [`schemas/hess-expert-header.schema.json`](schemas/hess-expert-header.schema.json)
+- [`schemas/hess-dense-header.schema.json`](schemas/hess-dense-header.schema.json)
+- [`schemas/inputs-header.schema.json`](schemas/inputs-header.schema.json)
 
-Related specifications: [`FORMAT.md`](FORMAT.md) (release weight layout), [`PIECE.md`](PIECE.md) (single-slot `exlr8-v2-job` pieces), [`protocol/README.md`](protocol/README.md) (site/encoder HTTP API).
+Related specifications: [`FORMAT.md`](FORMAT.md) (release weight layout), [`PIECE.md`](PIECE.md) (single-slot `exlr8-v2-job` pieces).
 
 ## Symbols
 

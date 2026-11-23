@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/piece-header.schema.json",
+  "$id": "https://kindlingai.dev/schemas/exlr8/v1/piece-header.schema.json",
   "title": "exlr8-v2-job piece safetensors JSON header",
   "description": "Structural schema for the JSON header of a single-slot exlr8-v2-job piece safetensors file (PIECE.md). Cross-field checks (contiguous offsets, exact file length, slot/plan agreement, encode_args flag values) are described in PIECE.md.",
   "type": "object",
@@ -62,14 +62,14 @@
           "pattern": "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$"
         },
         "weights_id": {
-          "$ref": "common.schema.json#/$defs/Sha256Hex"
+          "$ref": "#/$defs/Sha256Hex"
         },
         "encode_args": {
           "type": "string",
           "minLength": 1
         },
         "encoder_commit": {
-          "$ref": "common.schema.json#/$defs/EncoderId"
+          "$ref": "#/$defs/EncoderId"
         },
         "encoding": {
           "type": "string",
@@ -115,9 +115,7 @@
   "patternProperties": {
     "^(shared\\.)?k2\\.(gate|up|down)\\.trellis$": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TrellisBase"
-        },
+        { "$ref": "#/$defs/TrellisBase" },
         {
           "properties": {
             "shape": {
@@ -134,9 +132,7 @@
     },
     "^(shared\\.)?k3\\.(gate|up|down)\\.trellis$": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TrellisBase"
-        },
+        { "$ref": "#/$defs/TrellisBase" },
         {
           "properties": {
             "shape": {
@@ -153,9 +149,7 @@
     },
     "^(shared\\.)?k4\\.(gate|up|down)\\.trellis$": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TrellisBase"
-        },
+        { "$ref": "#/$defs/TrellisBase" },
         {
           "properties": {
             "shape": {
@@ -172,14 +166,10 @@
     },
     "^(shared\\.)?k[234]\\.(gate\\.svh|up\\.svh|down\\.suh)$": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TensorEntry"
-        },
+        { "$ref": "#/$defs/TensorEntry" },
         {
           "properties": {
-            "dtype": {
-              "const": "F16"
-            },
+            "dtype": { "const": "F16" },
             "shape": {
               "prefixItems": [
                 { "const": 1 },
@@ -194,14 +184,10 @@
     },
     "^(shared\\.)?k[234]\\.(gate\\.su_block|up\\.su_block|down\\.sv_block)$": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TensorEntry"
-        },
+        { "$ref": "#/$defs/TensorEntry" },
         {
           "properties": {
-            "dtype": {
-              "const": "F16"
-            },
+            "dtype": { "const": "F16" },
             "shape": {
               "prefixItems": [
                 { "const": 1 },
@@ -219,6 +205,14 @@
     "$ref": "#/$defs/TensorEntry"
   },
   "$defs": {
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "EncoderId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}(-unchecked)?$"
+    },
     "TensorEntry": {
       "type": "object",
       "required": ["dtype", "shape", "data_offsets"],
@@ -229,10 +223,7 @@
         },
         "shape": {
           "type": "array",
-          "items": {
-            "type": "integer",
-            "minimum": 0
-          }
+          "items": { "type": "integer", "minimum": 0 }
         },
         "data_offsets": {
           "type": "array",
@@ -248,14 +239,10 @@
     },
     "SignVector": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TensorEntry"
-        },
+        { "$ref": "#/$defs/TensorEntry" },
         {
           "properties": {
-            "dtype": {
-              "const": "I8"
-            },
+            "dtype": { "const": "I8" },
             "shape": {
               "prefixItems": [
                 { "type": "integer", "minimum": 128, "multipleOf": 128 }
@@ -269,14 +256,10 @@
     },
     "TrellisBase": {
       "allOf": [
-        {
-          "$ref": "#/$defs/TensorEntry"
-        },
+        { "$ref": "#/$defs/TensorEntry" },
         {
           "properties": {
-            "dtype": {
-              "const": "I16"
-            },
+            "dtype": { "const": "I16" },
             "shape": {
               "minItems": 4,
               "maxItems": 4

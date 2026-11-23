@@ -1,6 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/piece-done.post.response.schema.json",
-  "title": "POST /api/claims/{job}/{layer}/{expert}/piece-done response",
-  "$ref": "common.schema.json#/$defs/PieceReply"
-}
