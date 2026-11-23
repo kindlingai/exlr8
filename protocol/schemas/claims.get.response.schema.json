@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/claims.get.response.schema.json",
+  "title": "GET /api/claims response",
+  "type": "array",
+  "items": {
+    "$ref": "common.schema.json#/$defs/Claim"
+  }
+}

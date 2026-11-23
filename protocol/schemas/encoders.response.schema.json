@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/encoders.response.schema.json",
+  "title": "GET /api/encoders response",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["commit_id", "added_at", "note"],
+    "properties": {
+      "commit_id": {
+        "$ref": "common.schema.json#/$defs/GitCommit40"
+      },
+      "added_at": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Timestamp in Unix milliseconds when the commit was added."
+      },
+      "note": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/piece-done.post.request.schema.json",
+  "title": "POST /api/claims/{job}/{layer}/{expert}/piece-done request",
+  "type": "object",
+  "properties": {
+    "sha256": {
+      "$ref": "common.schema.json#/$defs/Sha256Hex",
+      "description": "Optional self-reported SHA-256 of the uploaded piece, checked later by the harvester or job feeder."
+    }
+  },
+  "additionalProperties": false
+}

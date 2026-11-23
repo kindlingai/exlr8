@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8-protocol/v1/claims.delete.response.schema.json",
+  "title": "DELETE /api/claims response",
+  "type": "object",
+  "required": ["released"],
+  "properties": {
+    "job": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Present when the request scoped release with ?job=J."
+    },
+    "released": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}
