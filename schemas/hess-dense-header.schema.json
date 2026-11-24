@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8/v1/hess-dense-header.schema.json",
+  "title": "Dense / shared Hessian safetensors JSON header (hess-LLL-dense.safetensors)",
+  "description": "Structural schema for the JSON header of hess-LLL-dense.safetensors, hess-LLL-dense-heldout.safetensors, and site-synthesized hess-LLL-shared.safetensors (HESSIAN.md). Cross-field checks (contiguous offsets, exact file size, square matrix dimensions, count_<name> pairing, and shared_down_in presence when shared_expert is true) are specified in HESSIAN.md.",
+  "type": "object",
+  "required": ["__metadata__", "mlp_in", "count_mlp_in"],
+  "propertyNames": {
+    "pattern": "^(__metadata__|[A-Za-z0-9_]+)$"
+  },
+  "properties": {
+    "__metadata__": {
+      "type": "object",
+      "required": ["hessian_id", "weights_id", "layer", "layout", "sequences"],
+      "properties": {
+        "hessian_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "weights_id": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "layer": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "layout": {
+          "const": "full, fp32"
+        },
+        "sequences": {
+          "type": "string",
+          "enum": ["calibration", "held out"]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "mlp_in": {
+      "$ref": "#/$defs/DenseMatrix"
+    },
+    "count_mlp_in": {
+      "$ref": "#/$defs/CountScalar"
+    }
+  },
+  "patternProperties": {
+    "^count_[A-Za-z0-9_]+$": {
+      "$ref": "#/$defs/CountScalar"
+    }
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/DenseMatrix"
+  },
+  "$defs": {
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "DataOffsets": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "integer", "minimum": 0 }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "DenseMatrix": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "F32" },
+        "shape": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "integer", "minimum": 1 }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    },
+    "CountScalar": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "I64" },
+        "shape": {
+          "type": "array",
+          "prefixItems": [
+            { "const": 1 }
+          ],
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8/v1/hess-expert-header.schema.json",
+  "title": "Routed expert Hessian safetensors JSON header (hess-LLL-eAAA-BBB.safetensors)",
+  "description": "Structural schema for the JSON header of hess-LLL-eAAA-BBB.safetensors and site-synthesized hess-LLL-eEEE-EEE.safetensors (HESSIAN.md). Cross-field checks (contiguous offsets, exact file size, triangular dimensions T(H)/T(I), and n == B - A + 1 == gu.shape[0] == down.shape[0] == count.shape[0]) are specified in HESSIAN.md.",
+  "type": "object",
+  "required": ["__metadata__", "gu", "down", "count"],
+  "properties": {
+    "__metadata__": {
+      "type": "object",
+      "required": ["hessian_id", "weights_id", "layer", "experts", "layout"],
+      "properties": {
+        "hessian_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "weights_id": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "layer": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "experts": {
+          "type": "string",
+          "pattern": "^[0-9]+-[0-9]+$"
+        },
+        "layout": {
+          "const": "upper triangle, row-major, fp32"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "gu": {
+      "$ref": "#/$defs/TriuBatch"
+    },
+    "down": {
+      "$ref": "#/$defs/TriuBatch"
+    },
+    "count": {
+      "$ref": "#/$defs/CountVector"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "DataOffsets": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "integer", "minimum": 0 }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "TriuBatch": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "F32" },
+        "shape": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "integer", "minimum": 1 }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    },
+    "CountVector": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": { "const": "I64" },
+        "shape": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer", "minimum": 1 }
+          ],
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "data_offsets": { "$ref": "#/$defs/DataOffsets" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

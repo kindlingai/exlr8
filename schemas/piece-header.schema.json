@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindlingai.dev/schemas/exlr8/v1/piece-header.schema.json",
+  "title": "exlr8-v2-job piece safetensors JSON header",
+  "description": "Structural schema for the JSON header of a single-slot exlr8-v2-job piece safetensors file (PIECE.md). Cross-field checks (contiguous offsets, exact file length, slot/plan agreement, encode_args flag values) are described in PIECE.md.",
+  "type": "object",
+  "maxProperties": 65,
+  "required": ["__metadata__", "signs.in", "signs.out"],
+  "properties": {
+    "__metadata__": {
+      "type": "object",
+      "required": [
+        "format",
+        "layer",
+        "experts",
+        "hessian",
+        "encoder_commit",
+        "encode_args"
+      ],
+      "properties": {
+        "format": {
+          "const": "exlr8-v2-job"
+        },
+        "scheme": {
+          "type": "string",
+          "minLength": 1
+        },
+        "layer": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "experts": {
+          "type": "string",
+          "pattern": "^(none|[0-9]+)$"
+        },
+        "shared": {
+          "type": "string",
+          "enum": ["true", "false"]
+        },
+        "widths": {
+          "type": "string",
+          "pattern": "^[234](,[234])*$"
+        },
+        "shared_widths": {
+          "type": "string",
+          "pattern": "^([234](,[234])*)?$"
+        },
+        "codebook": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tail_biting": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hessian": {
+          "type": "string",
+          "minLength": 1
+        },
+        "damping": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$"
+        },
+        "weights_id": {
+          "$ref": "#/$defs/Sha256Hex"
+        },
+        "encode_args": {
+          "type": "string",
+          "minLength": 1
+        },
+        "encoder_commit": {
+          "$ref": "#/$defs/EncoderId"
+        },
+        "encoding": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,8}$"
+        }
+      },
+      "patternProperties": {
+        "^codebook_k[234]$": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": {
+        "properties": {
+          "experts": {
+            "const": "none"
+          }
+        },
+        "required": ["experts"]
+      },
+      "then": {
+        "required": ["shared", "shared_widths"],
+        "properties": {
+          "shared": {
+            "const": "true"
+          }
+        }
+      },
+      "else": {
+        "required": ["widths"]
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "signs.in": {
+      "$ref": "#/$defs/SignVector"
+    },
+    "signs.out": {
+      "$ref": "#/$defs/SignVector"
+    }
+  },
+  "patternProperties": {
+    "^(shared\\.)?k2\\.(gate|up|down)\\.trellis$": {
+      "allOf": [
+        { "$ref": "#/$defs/TrellisBase" },
+        {
+          "properties": {
+            "shape": {
+              "prefixItems": [
+                { "const": 1 },
+                { "type": "integer", "minimum": 8, "multipleOf": 8 },
+                { "type": "integer", "minimum": 8, "multipleOf": 8 },
+                { "const": 32 }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "^(shared\\.)?k3\\.(gate|up|down)\\.trellis$": {
+      "allOf": [
+        { "$ref": "#/$defs/TrellisBase" },
+        {
+          "properties": {
+            "shape": {
+              "prefixItems": [
+                { "const": 1 },
+                { "type": "integer", "minimum": 8, "multipleOf": 8 },
+                { "type": "integer", "minimum": 8, "multipleOf": 8 },
+                { "const": 48 }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "^(shared\\.)?k4\\.(gate|up|down)\\.trellis$": {
+      "allOf": [
+        { "$ref": "#/$defs/TrellisBase" },
+        {
+          "properties": {
+            "shape": {
+              "prefixItems": [
+                { "const": 1 },
+                { "type": "integer", "minimum": 8, "multipleOf": 8 },
+                { "type": "integer", "minimum": 8, "multipleOf": 8 },
+                { "const": 64 }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "^(shared\\.)?k[234]\\.(gate\\.svh|up\\.svh|down\\.suh)$": {
+      "allOf": [
+        { "$ref": "#/$defs/TensorEntry" },
+        {
+          "properties": {
+            "dtype": { "const": "F16" },
+            "shape": {
+              "prefixItems": [
+                { "const": 1 },
+                { "type": "integer", "minimum": 128, "multipleOf": 128 }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        }
+      ]
+    },
+    "^(shared\\.)?k[234]\\.(gate\\.su_block|up\\.su_block|down\\.sv_block)$": {
+      "allOf": [
+        { "$ref": "#/$defs/TensorEntry" },
+        {
+          "properties": {
+            "dtype": { "const": "F16" },
+            "shape": {
+              "prefixItems": [
+                { "const": 1 },
+                { "type": "integer", "minimum": 1 }
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/TensorEntry"
+  },
+  "$defs": {
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "EncoderId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}(-unchecked)?$"
+    },
+    "TensorEntry": {
+      "type": "object",
+      "required": ["dtype", "shape", "data_offsets"],
+      "properties": {
+        "dtype": {
+          "type": "string",
+          "enum": ["I8", "U8", "I16", "F16", "BF16", "I32", "F32", "I64", "U64", "F64"]
+        },
+        "shape": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "data_offsets": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "integer", "minimum": 0 }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "SignVector": {
+      "allOf": [
+        { "$ref": "#/$defs/TensorEntry" },
+        {
+          "properties": {
+            "dtype": { "const": "I8" },
+            "shape": {
+              "prefixItems": [
+                { "type": "integer", "minimum": 128, "multipleOf": 128 }
+              ],
+              "minItems": 1,
+              "maxItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "TrellisBase": {
+      "allOf": [
+        { "$ref": "#/$defs/TensorEntry" },
+        {
+          "properties": {
+            "dtype": { "const": "I16" },
+            "shape": {
+              "minItems": 4,
+              "maxItems": 4
+            }
+          }
+        }
+      ]
+    }
+  }
+}
