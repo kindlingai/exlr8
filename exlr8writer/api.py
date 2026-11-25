@@ -18,10 +18,11 @@ import xxhash
 
 ALIGN = 1 << 16
 PROJECTIONS = ("gate", "up", "down")
-# Trellis codebooks, by the name a ``codebook`` string starts with, and the multipliers it must also give (pmcgx,
-# the pair trellis, has two). mcg is the unmarked default; any other codebook suffixes the trellis tensor names, so
-# a reader that does not implement it fails to find the tensor rather than decoding with the wrong hash.
-CODEBOOKS = {"mcg": ("0xCBAC1FED",), "mul1": ("0x83DCD12D",), "pmcgx": ("0xCBAC1FED", "0xBCA14C51")}
+# Trellis codebooks, by the name a ``codebook`` string starts with, and the multipliers it must also give (the pair
+# codebooks pmcgx and pmul1x have two). mcg is the unmarked default; any other codebook suffixes the trellis tensor
+# names, so a reader that does not implement it fails to find the tensor rather than decoding with the wrong hash.
+CODEBOOKS = {"mcg": ("0xCBAC1FED",), "mul1": ("0x83DCD12D",), "pmcgx": ("0xCBAC1FED", "0xBCA14C51"),
+             "pmul1x": ("0x13755EC1", "0xF8D9B559")}
 SIDES = {
     "gate": ("svh", "su_block"),
     "up": ("svh", "su_block"),

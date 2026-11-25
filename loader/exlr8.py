@@ -32,13 +32,17 @@ E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -
 MCG = 0xCBAC1FED
 MCG2 = 0xBCA14C51               # pmcgx's second multiplier
 MUL1 = 0x83DCD12D
+PMUL1X = (0x13755EC1, 0xF8D9B559)   # pmul1x's two multipliers
 # mul1's scale and offset, exactly the fp16 bit patterns the kernel holds: v = fp16(1024 + byte_sum) * C + D.
 C_MUL1 = 0.00676727294921875    # fp16 0x1EEE
 D_MUL1 = -10.3828125            # fp16 0xC931
 # The trellis codebooks (FORMAT.md "Codebook"): name -> (state bits, multipliers its `codebook` metadata must name).
 # Each has an -f16 form with the same hash and no E4M3 rounding.
-CODEBOOKS = {"mcg": (16, ("0xCBAC1FED",)), "mul1": (16, ("0x83DCD12D",)), "pmcgx": (20, ("0xCBAC1FED", "0xBCA14C51"))}
+CODEBOOKS = {"mcg": (16, ("0xCBAC1FED",)), "mul1": (16, ("0x83DCD12D",)), "pmcgx": (20, ("0xCBAC1FED", "0xBCA14C51")),
+             "pmul1x": (20, ("0x13755EC1", "0xF8D9B559"))}
 CODEBOOKS.update({f"{k}-f16": v for k, v in list(CODEBOOKS.items())})
+# The byte-sum codebooks: their -f16 forms decode to the exact integer (byte sum - 510) * C_MUL1, not the fp16 v.
+BYTE_SUM = ("mul1", "pmul1x")
 FORMATS = ("exlr8-v2", "exlr8-v4")
 MIXING = ("none", "width", "expert")
 TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS = 1, 2, 3, 4, 5, 6, 7, 8, 9  # record field 0
@@ -113,8 +117,8 @@ def tile_perm():
 
 
 def is_pair(cb):
-    """pmcgx and pmcgx-f16: one 20-bit state per pair of weights, 2K new bits per state."""
-    return cb.removesuffix("-f16") == "pmcgx"
+    """pmcgx, pmul1x and their -f16 forms: one 20-bit state per pair of weights, 2K new bits per state."""
+    return cb.removesuffix("-f16") in ("pmcgx", "pmul1x")
 
 
 def check_width(K, cb):
@@ -146,18 +150,33 @@ def mul1_byte_sum(states):
     return sum((x >> shift) & 0xFF for shift in (0, 8, 16, 24))
 
 
+def pmul1x_byte_sums(states):
+    """pmul1x's hash: [..., 2], the byte sums of weights 2p and 2p + 1, each 0 to 1020. x1 = w * c1 and x2 = w * c2;
+    weight 2p sums x1's two low bytes and x2's two high bytes, weight 2p + 1 the other four."""
+    w = states & 0xFFFFF
+    x1, x2 = (w * PMUL1X[0]) & 0xFFFFFFFF, (w * PMUL1X[1]) & 0xFFFFFFFF
+    b1 = [(x1 >> shift) & 0xFF for shift in (0, 8, 16, 24)]
+    b2 = [(x2 >> shift) & 0xFF for shift in (0, 8, 16, 24)]
+    return torch.stack([b1[0] + b1[1] + b2[2] + b2[3], b1[2] + b1[3] + b2[0] + b2[1]], -1)
+
+
+def byte_sum(states, cb):
+    """The byte sum of a byte-sum codebook (mul1, pmul1x, either form): [...] for mul1, [..., 2] for pmul1x."""
+    return mul1_byte_sum(states) if cb.removesuffix("-f16") == "mul1" else pmul1x_byte_sums(states)
+
+
 def codebook_f16(states, cb="mcg"):
     """Trellis states -> the codebook's fp16 values, before any rounding. mcg and mul1 take 16-bit states and give one
-    value each; pmcgx takes 20-bit pair states and gives [..., 2], the values of weights 2p and 2p + 1. The -f16
-    forms hash the same way; mul1-f16 alone then takes a different value (see codebook)."""
+    value each; pmcgx and pmul1x take 20-bit pair states and give [..., 2], the values of weights 2p and 2p + 1. The
+    -f16 forms hash the same way; mul1-f16 and pmul1x-f16 then take a different value (see codebook)."""
     name = cb.removesuffix("-f16")
     if name == "mcg":
         x = _mask(((states & 0xFFFF) * MCG) & 0xFFFFFFFF)
         return _fp16(x & 0xFFFF) + _fp16(x >> 16)
-    if name == "mul1":
+    if name in BYTE_SUM:
         # fp16 0x6400 is 1024.0 and the binade's ulp is 1, so 1024 + byte_sum is exact. The kernel's fused
         # multiply-add rounds once: double here, then fp16, gives the same bits.
-        return ((1024 + mul1_byte_sum(states)).double() * C_MUL1 + D_MUL1).half()
+        return ((1024 + byte_sum(states, name)).double() * C_MUL1 + D_MUL1).half()
     if name == "pmcgx":
         w = states & 0xFFFFF
         x1, x2 = _mask((w * MCG) & 0xFFFFFFFF), _mask((w * MCG2) & 0xFFFFFFFF)
@@ -168,11 +187,11 @@ def codebook_f16(states, cb="mcg"):
 
 def codebook(states, cb="mcg"):
     """Trellis states -> fp32 weights: the codebook's fp16 values, then, for every codebook but the -f16 forms, E4M3
-    rounding (round to nearest even, saturating). mul1-f16 is the exact (byte_sum - 510) * C_MUL1."""
-    if cb == "mul1-f16":
+    rounding (round to nearest even, saturating). mul1-f16 and pmul1x-f16 are the exact (byte_sum - 510) * C_MUL1."""
+    if cb.endswith("-f16") and cb.removesuffix("-f16") in BYTE_SUM:
         # Exact in fp32 (9 by 11 significant bits), and unlike mul1's fp16 multiply-add it lets an fp16 engine keep
         # the integer byte_sum - 510 and apply C_MUL1 with its scales.
-        return (mul1_byte_sum(states) - 510).float() * C_MUL1
+        return (byte_sum(states, cb) - 510).float() * C_MUL1
     v = codebook_f16(states, cb).float()
     if cb.endswith("-f16"):
         return v
