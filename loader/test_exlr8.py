@@ -26,11 +26,19 @@ STATES = {
               [74565, ["3e6d", "c0b4"], ["3e80", "c080"]], [524287, ["c120", "1e00"], ["c100", "1e00"]],
               [524288, ["3ea4", "395c"], ["3e80", "3980"]], [782069, ["bd2e", "4070"], ["bd00", "4080"]],
               [1048575, ["b9b0", "ac60"], ["b980", "ac80"]]],
+    "pmul1x": [[0, ["c2e8", "c2e8"], ["c300", "c300"]], [1, ["3e8b", "b9a5"], ["3e80", "b980"]],
+               [74565, ["385f", "2c37"], ["3880", "2c00"]], [524287, ["3af8", "3990"], ["3b00", "3980"]],
+               [524288, ["bb98", "bef0"], ["bb80", "bf00"]], [782069, ["ae2e", "9770"], ["ae00", "9800"]],
+               [1048575, ["ad50", "3974"], ["ad80", "3980"]]],
 }
 # mul1-f16: state -> the integer byte_sum - 510; the weight is that times C_MUL1
 MUL1_F16 = {0: -510, 1: 95, 4660: -85, 32767: 288, 32768: -128, 48879: 24, 65535: -96}
 # sha256 of the table of those integers, as little-endian i16, over every state
 MUL1_F16_TABLE = "85abd370a7531193db8b9df21a70a0a4dd870464ea74d7f33fff5db3213b929b"
+# pmul1x-f16: state -> the integers byte_sum - 510 of weights 2p and 2p + 1, and the sha256 of their table
+PMUL1X_F16 = {0: [-510, -510], 1: [242, -104], 74565: [81, 10], 524287: [129, 103], 524288: [-140, -256],
+              782069: [-14, 0], 1048575: [-12, 101]}
+PMUL1X_F16_TABLE = "1371509153e88d27e56616f2aadff81a2c3e3c5043f8fd1829606198cc9cd9a8"
 # sha256 of the fp16 table and of the E4M3 table (one byte per value)
 TABLES = {
     "mcg": ("95383563929baa9d1ae5de0be22490284382673620bdd85929feea7bdbef04a9",
@@ -39,6 +47,8 @@ TABLES = {
              "ee3283e85586daec879a03d2cf93b7f33e8f3400b1c2b55e9eb4563f152a45cc"),
     "pmcgx": ("c2f33d5515f86e4c296867d9ca4f6871f8c1441248b24410bebc13e49da442a5",
               "7f66c49ed68c726cc5b602dc7df7788e06662000893b5fa52d4b042a834be07e"),
+    "pmul1x": ("c7f10379ba9c11052b774bdac2a53e67c21f26fa57dc2a9e9bd301129c289388",
+               "b6973dd205d4bc1b87469240f73cac8c05898ac7e12fd37abcb7e0411928d300"),
 }
 # first 16 hex digits of the sha256 of the decoded tile with byte j = (37j + 11) mod 256
 TILES = {
@@ -52,9 +62,15 @@ TILES = {
     ("pmcgx", 5): "c037dde67a1f5de4",
     ("mcg-f16", 6): "626bfe33614027e1", ("mul1-f16", 6): "8194763e86479b2e",
     ("pmcgx-f16", 5.5): "8d06db3bf149c785", ("pmcgx-f16", 6): "b888e32d22699015",
+    ("pmul1x", 0.5): "2d5246bb48deff89", ("pmul1x", 1): "8025036245972646", ("pmul1x", 1.5): "37f9be48867ea152",
+    ("pmul1x", 2): "98da956a07adbc79", ("pmul1x", 2.5): "f4946c25b34b2fe0", ("pmul1x", 3): "7a72d1dd5f2c8478",
+    ("pmul1x", 3.5): "90a0efed5e77528e", ("pmul1x", 4): "79d9ba536e499ff0", ("pmul1x", 4.5): "62c17e5462268df4",
+    ("pmul1x", 5): "8829e7991f56a46c",
+    ("pmul1x-f16", 5.5): "77a36b43b71e4c6b", ("pmul1x-f16", 6): "aebf5b38d2a71e33",
 }
 WIDTHS = {"mcg": [1, 2, 3, 4, 5], "pmcgx": [k / 2 for k in range(1, 11)],
-          "mcg-f16": [1, 2, 3, 4, 5, 6], "mul1-f16": [1, 2, 3, 4, 5, 6], "pmcgx-f16": [k / 2 for k in range(1, 13)]}
+          "mcg-f16": [1, 2, 3, 4, 5, 6], "mul1-f16": [1, 2, 3, 4, 5, 6], "pmcgx-f16": [k / 2 for k in range(1, 13)],
+          "pmul1x": [k / 2 for k in range(1, 11)], "pmul1x-f16": [k / 2 for k in range(1, 13)]}
 
 
 def hex16(t):
@@ -73,7 +89,7 @@ def test_codebook_states(cb):
         s = torch.tensor([state])
         assert hex16(x.codebook_f16(s, cb)) == v
         assert hex16(x.codebook(s, cb).half()) == rounded
-        if cb != "mul1":
+        if cb not in x.BYTE_SUM:
             assert hex16(x.codebook(s, cb + "-f16").half()) == v
 
 
@@ -99,8 +115,36 @@ def test_codebook_tables(cb):
     e4 = x.codebook(states, cb).to(torch.float8_e4m3fn).reshape(-1).contiguous()
     assert sha(f16.view(torch.int16).numpy().tobytes()) == TABLES[cb][0]
     assert sha(e4.view(torch.uint8).numpy().tobytes()) == TABLES[cb][1]
-    if cb != "mul1":
+    if cb not in x.BYTE_SUM:
         assert torch.equal(x.codebook(states, cb + "-f16").reshape(-1), f16.float())
+
+
+def test_pmul1x_f16_states():
+    for state, n in PMUL1X_F16.items():
+        assert x.codebook(torch.tensor([state]), "pmul1x-f16").reshape(-1).tolist() == [k * x.C_MUL1 for k in n]
+
+
+def test_pmul1x_f16_table():
+    states = torch.arange(1 << 20)
+    n = x.pmul1x_byte_sums(states) - 510
+    assert sha(n.reshape(-1).to(torch.int16).numpy().tobytes()) == PMUL1X_F16_TABLE
+    assert torch.equal(x.codebook(states, "pmul1x-f16").double(), n.double() * x.C_MUL1)
+
+
+def test_pmul1x_gpu_form():
+    """The decode FORMAT.md suggests for pmul1x: PRMT 0x7610 / 0x5432 picks each weight's four bytes from x1 and x2,
+    and a dp4a accumulating into 0x6400 gives fp16(1024 + byte sum). Emulated on integers, every state."""
+    w = torch.arange(1 << 20)
+    x1, x2 = (w * x.PMUL1X[0]) & 0xFFFFFFFF, (w * x.PMUL1X[1]) & 0xFFFFFFFF
+
+    def prmt(a, b, sel):
+        src = [(a >> (8 * i)) & 0xFF for i in range(4)] + [(b >> (8 * i)) & 0xFF for i in range(4)]
+        return sum(src[(sel >> (4 * i)) & 7] << (8 * i) for i in range(4))
+
+    def dp4a_6400(v):
+        return sum((v >> (8 * i)) & 0xFF for i in range(4)) + 0x6400
+    got = torch.stack([x._fp16(dp4a_6400(prmt(x1, x2, sel))) for sel in (0x7610, 0x5432)], -1).float() - 1534
+    assert torch.equal(got, (x.pmul1x_byte_sums(w) - 510).float())
 
 
 # ---------------------------------------------------------------- tiles
