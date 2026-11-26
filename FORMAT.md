@@ -8,7 +8,7 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 |---|---|---|
 | v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
 | v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
-| v4 | widths K0.5-K6 with pair-codebook half widths, the pmul1x codebook, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths, dense [format strings](#format-strings) in metadata `formats`, [int8 dense groups](#int8-groups) | `exlr8-v4` |
+| v4 | widths K0.5-K6 with pair-codebook half widths, the pmul1x codebook, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths, dense [matrix descriptions](#matrix-descriptions) in metadata `matrices`, [int8 dense groups](#int8-groups) | `exlr8-v4` |
 
 A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
 features are a subset; a v2 reader refuses v4 files by their `format`.
@@ -372,25 +372,38 @@ A manifest names a native store by its name where it would give a width K.
 
 ## Dense, vocab, extra and split files
 
-Each matrix `M` = `M.record` + `M.checksum` + data tensors, and a format string in the file's `formats` metadata.
+Each matrix `M` = `M.record` + `M.checksum` + data tensors, and an entry in the file's `matrices` metadata.
 Vectors (norms, biases, gates) stored as-is under their stored names.
+
+### Matrix descriptions
+
+Metadata `matrices` is a JSON object from each matrix's base name (`M`, or `M.kK` for a matrix stored at several
+[widths](#dense-widths)) to its description. A v4 writer describes every matrix of a dense, vocab, extra or split
+file there.
+
+| key | value |
+|---|---|
+| `format` | the [format string](#format-strings) |
+| `side` | the sharded side: `replicated`, `out` (output channels) or `in` (input channels) |
+| `unit` | channels per sharding unit, a JSON integer; absent when `side` is `replicated` |
+| `rotation` | trellis and row trellis only: `own`, or the name of a shared input rotation (`attn_in`, `q_resid`, `mlp_in`, ...). Matrices of a layer that name the same rotation share their input signs and Hadamard, so an engine rotates that input once. Absent means `own` |
+| `solve` | how the codes were chosen: `copy` (the source's own values), `rtn` (round to nearest) or `hessian` (GPTQ / LDLQ against the input Hessian) |
+
+Refuse a file whose `matrices` leaves out one of its matrices, names a matrix it does not hold, has a key or value
+you do not know, or gives a format string you do not implement. A file with no `matrices` (every `exlr8-v2` file,
+and v4 files written before it) describes each matrix by its record's legacy fields, below; `matrices` in an
+`exlr8-v2` file is a v4 feature.
 
 ### Format strings
 
-Metadata `formats` is a JSON object from each matrix's base name (`M`, or `M.kK` for a matrix stored at several
-[widths](#dense-widths)) to its format string. A v4 writer names every matrix of a dense, vocab, extra or split file
-there. Refuse a file whose `formats` leaves out one of its matrices, names a matrix it does not hold, or gives a
-string you do not implement. A file with no `formats` (every `exlr8-v2` file, and v4 files written before it) gives
-each matrix's format by record field 0, the legacy code below; `formats` in an `exlr8-v2` file is a v4 feature.
-
 | format string | legacy code | data tensors | value |
 |---|---|---|---|
-| `trellis kK` | 1 | `trellis` U8 [entries, bytes], `suh` F16 [in], `svh` F16 [out] | side 2: entry g = input rows 128g.., down tile order; else entry g = output cols 128g.., gate/up tile order; decode as above |
-| `int4 g32` | 2 | `q4` U8, `s4` F16; side 2: [in/128, out, 64], [in/128, out, 4]; else [out, in/2], [out, in/32] | (nibble − 8) · s4, low nibble first, one scale per 32 inputs |
-| `int8 gG` | none | `q8` I8, `s8` F16; side 2: [in/128, out, 128], [in/128, out, 128/G]; else [out, in], [out, in/G] | q8 · s8, one scale per G consecutive inputs; see [int8 groups](#int8-groups) |
+| `trellis kK` | 1 | `trellis` U8 [entries, bytes], `suh` F16 [in], `svh` F16 [out] | side `in`: entry g = input rows 128g.., down tile order; else entry g = output cols 128g.., gate/up tile order; decode as above |
+| `int4 g32` | 2 | `q4` U8, `s4` F16; side `in`: [in/128, out, 64], [in/128, out, 4]; else [out, in/2], [out, in/32] | (nibble − 8) · s4, low nibble first, one scale per 32 inputs |
+| `int8 gG` | none | `q8` I8, `s8` F16; side `in`: [in/128, out, 128], [in/128, out, 128/G]; else [out, in], [out, in/G] | q8 · s8, one scale per G consecutive inputs; see [int8 groups](#int8-groups) |
 | `mxfp8` | 3 | `fp8` U8 [out, in], `e8m0` U8 [out, in/32] | e4m3 · 2^(e8m0 − 127) |
 | `fp8 b128` | 4 | `fp8` U8 [out, in], `scale` F32 [⌈out/128⌉, ⌈in/128⌉] | e4m3 · scale[⌊r/128⌋, ⌊c/128⌋] |
-| `fp8 b32` | 8 | `fp8` U8, `e8m0` U8; side 2: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
+| `fp8 b32` | 8 | `fp8` U8, `e8m0` U8; side `in`: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
 | `fp8 row` | 5 | `fp8` U8 [out, in], `scale` F32 [out] | e4m3 · scale[r] |
 | `bf16` | 6 | `bf16` [out, in] | as stored |
 | `fp32` | 7 | `fp32` [out, in] | as stored |
@@ -401,20 +414,22 @@ kK is a [width name](#symbols) (`trellis k4`, `row-trellis k4p5`). The codebook 
 
 ### Records
 
-`M.record`, I64 [8]:
+`M.record`, I64 [8]. Fields 1 and 2 give the full matrix shape. The other fields are legacy: a file without
+`matrices` describes each matrix with them, and a file with `matrices` writes each as 0 or as the description's
+legacy value.
 
-| field | values |
+| field | legacy value |
 |---|---|
-| 0 legacy format | the legacy code of a file without `formats`; with `formats`, 0 or the string's legacy code |
-| 1 out, 2 in | full matrix shape |
-| 3 K | trellis and row trellis: the width, a half-integer K as −2K (−9 for K4.5), equal to the format string's; else 0 |
-| 4 sharded side | 0 replicated, 1 output channels, 2 input channels |
-| 5 channels per sharding unit | 0 if replicated |
-| 6 shared input rotation (trellis) | 0 own; i ≥ 1: entry i of metadata `rotations` (absent: 1 `attn_in`, 2 `q_resid`, 3 `mlp_in`) |
-| 7 solve | 0 RTN or copied, 1 Hessian (GPTQ / LDLQ) |
+| 0 format | the format string's legacy code |
+| 1 out, 2 in | full matrix shape (not legacy) |
+| 3 K | trellis and row trellis: the width, a half-integer K as −2K (−9 for K4.5); else 0 |
+| 4 side | 0 `replicated`, 1 `out`, 2 `in` |
+| 5 unit | channels per sharding unit; 0 if replicated |
+| 6 rotation | 0 `own`; i ≥ 1: entry i of metadata `rotations`, a comma list (absent: 1 `attn_in`, 2 `q_resid`, 3 `mlp_in`) |
+| 7 solve | 0 `rtn` (or `copy`), 1 `hessian` |
 
-Refuse a matrix whose field 0 or field 3 disagrees with its format string. A format with no legacy code, such as
-`int8 gG`, needs `formats`.
+Refuse a matrix whose nonzero legacy field disagrees with its description. A format with no legacy code, such as
+`int8 gG`, needs `matrices`.
 
 | file | contents |
 |---|---|
@@ -424,10 +439,10 @@ Refuse a matrix whose field 0 or field 3 disagrees with its format string. A for
 | `exlr8-split-NAME.pPPP` | `M.record` (full shape) + rows [r0, r1) of M's row-major data tensors + `M.checksum` of those rows (r0 a multiple of 128); metadata `rows` = `r0-r1`, `parts`, and for a layer's matrix `layer` and NAME = `LLL.<stored name>` |
 
 Dense checksum: one U64 per 128-channel block of the sharded side (per 128 output rows if replicated), xxhash64 seed 0
-over that block's rows of each data tensor in the table's order. Exceptions: `int4 g32`, `int8 gG` and `fp8 b32` on
-side 2 hash entry b of each data tensor; `fp8 b128` hashes rows 128b.. of `fp8` ‖ scale row b; `fp8 b32` on other
-sides hashes rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`; trellis hashes entry b ‖ its 128 sharded-side vector values ‖ the whole other-side
-vector; row trellis hashes rows 128b.. of `rows` ‖ `svh` of those rows ‖ the whole `suh`.
+over that block's rows of each data tensor in the table's order. Exceptions: `int4 g32`, `int8 gG` and `fp8 b32` on side
+`in` hash entry b of each data tensor; `fp8 b128` hashes rows 128b.. of `fp8` ‖ scale row b; `fp8 b32` on other sides
+hashes rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`; trellis hashes entry b ‖ its 128 sharded-side vector values ‖ the
+whole other-side vector; row trellis hashes rows 128b.. of `rows` ‖ `svh` of those rows ‖ the whole `suh`.
 
 ### Row trellis
 
@@ -440,8 +455,8 @@ tile permutation, decoded through stream, states and codebook as above. With v_r
 W[r, c] = suh[c] · (Hb v_r)[c] · svh[r]
 
 where Hb applies the 128 × 128 Hadamard to each run of 128 values, as in the trellis decode. `suh` carries the
-column signs. The record gives sharded side 1 and 1 channel per sharding unit (any row split works), K in field 3 (and
-the format string),
+column signs. It is described as side `out` with 1 channel per sharding unit (any row split works), its width in the
+format string,
 and the codebook names `rows` as it names `trellis` (`rows.pmcgx`). A table whose rows hold one 256-value slice per
 layer, as Gemma 4's per-layer embeddings do, reads one tile per layer per token.
 
@@ -451,17 +466,17 @@ layer, as Gemma 4's per-layer embeddings do, reads one tile per layer per token.
 
 W[r, c] = q8[r, c] · s8[r, ⌊c / G⌋]
 
-- G is a power of two from 16 to 128 (`int8 g16` … `int8 g128`), so a group never crosses a side-2 entry of 128
-  inputs. `in` is a multiple of G, and of 128 on side 2.
+- G is a power of two from 16 to 128 (`int8 g16` … `int8 g128`), so a group never crosses an entry of 128 inputs
+  on side `in`. `in` is a multiple of G, and of 128 when `side` is `in`.
 - `q8` is in [−127, 127]. −128 is not a code: refuse a matrix that holds it.
 - `s8` is a finite fp16 ≥ 0. A group whose scale is 0 decodes to zeros whatever its codes.
 - The product is exact in fp32 (7 + 11 significant bits), so every decoder gets the same weights. An int8 kernel can
   read `q8` as stored and apply `s8` to each group's partial sums.
 
-Record field 7 says how the codes were chosen. 0: round to nearest, s8 = fp16(max |w| over the group / 127),
-q8 = clamp(round-half-even(w / s8), −127, 127). 1: GPTQ against the matrix's input Hessian, columns in input order, each
-group's scale set by the same rule from the group's error-corrected weights when the solve reaches its first column.
-The decode is the same for both.
+The description's `solve` says how the codes were chosen. `rtn`: s8 = fp16(max |w| over the group / 127),
+q8 = clamp(round-half-even(w / s8), −127, 127). `hessian`: GPTQ against the matrix's input Hessian, columns in input
+order, each group's scale set by the same rule from the group's error-corrected weights when the solve reaches its
+first column. The decode is the same for both.
 
 ### Dense codebooks
 
@@ -473,11 +488,11 @@ codebook is missing from `codebooks` or not one you implement, and check its K a
 
 ### Dense widths
 
-A trellis matrix may be stored at several widths, so that manifests can choose between them. Each stored width
-then takes the prefix `M.kK.` in place of `M.`: `M.kK.record`, `M.kK.checksum` and `M.kK.trellis[.<codebook>]`,
-`M.kK.suh`, `M.kK.svh`, with K the width name (`q_proj.k2.record`, `q_proj.k3.record`). Record field 3 holds the
-same K. Each width is a separate encode with its own side vectors and may use its own codebook, but every width of
-M has the same shape, sharded side and channels per sharding unit. Such a matrix has no `M.record`.
+A trellis matrix may be stored at several widths, so that manifests can choose between them. Each stored width then
+takes the prefix `M.kK.` in place of `M.`: `M.kK.record`, `M.kK.checksum` and `M.kK.trellis[.<codebook>]`, `M.kK.suh`,
+`M.kK.svh`, with K the width name (`q_proj.k2.record`, `q_proj.k3.record`), and its own `matrices` entry whose format
+string holds the same K. Each width is a separate encode with its own side vectors and may use its own codebook, but
+every width of M has the same shape, sharded side and channels per sharding unit. Such a matrix has no `M.record`.
 
 The manifest's [`dense`](#manifestsexlr8-manifest-namejson) object picks one width for each such matrix. Refuse a
 manifest that leaves one out or names a width the file does not hold. Only `exlr8-dense-LLL` files hold several

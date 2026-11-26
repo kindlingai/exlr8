@@ -390,7 +390,7 @@ def test_dense_widths_refused(tmp_path, dense, meta):
 def int8_matrix(base, side, G, g, out=256, inp=384):
     """An int8 gG matrix (FORMAT.md "int8 groups") on output side 1 or input side 2, its weight computed directly
     from the row-major codes and scales, and its checksum by the spec's wording. Its format is `int8 gG`, which a
-    file names in `formats`."""
+    file describes in `matrices` (int8_desc)."""
     q = torch.randint(-127, 128, (out, inp), dtype=torch.int8, generator=g)
     sc = torch.rand(out, inp // G, generator=g).half()
     sc[0, 0] = 0                                                # a zero scale decodes to zeros
@@ -411,13 +411,17 @@ def int8_matrix(base, side, G, g, out=256, inp=384):
 INT8_META = {"format": "exlr8-v4", "layer": "0", "tensor_prefix": "m."}
 
 
+def int8_desc(side, G):
+    return {"format": f"int8 g{G}", "side": "in" if side == 2 else "out", "unit": 128, "solve": "hessian"}
+
+
 @pytest.mark.parametrize("side", [1, 2])
 @pytest.mark.parametrize("G", [16, 32, 64, 128])
 def test_int8_groups(tmp_path, side, G):
     g = torch.Generator().manual_seed(G + side)
     t, want = int8_matrix("o_proj", side, G, g)
     os.makedirs(tmp_path / "dense")
-    meta = {**INT8_META, "formats": json.dumps({"o_proj": f"int8 g{G}"})}
+    meta = {**INT8_META, "matrices": json.dumps({"o_proj": int8_desc(side, G)})}
     write_st(str(tmp_path / "dense" / "exlr8-dense-000.safetensors"), t, meta)
     got = x.load_layer(str(tmp_path), {"layers": {}}, 0, torch.float32, verify=True)
     assert torch.equal(got["m.0.o_proj.weight"], want)
@@ -459,46 +463,87 @@ def test_format_strings_refused(text):
         x.parse_format(text)
 
 
-def test_formats_match_legacy_codes(tmp_path):
-    """The same trellis file read by its legacy codes, and with formats and field 0 = 0, decodes the same."""
+def test_matrices_match_legacy_fields(tmp_path):
+    """The same trellis file read by its legacy record fields, and by `matrices` with those fields 0, decodes the
+    same."""
     legacy = dense_file(str(tmp_path / "a"), DENSE_META)
     want = x.load_layer(str(tmp_path / "a"), {"layers": {}, "dense": {"0": {"q_proj": 3}}}, 0, torch.float32,
                         verify=True)
     t = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in legacy.items()}
     for k in ("q_proj.k2.record", "q_proj.k3.record", "o_proj.record"):
-        t[k][0] = 0
-    formats = {"q_proj.k2": "trellis k2", "q_proj.k3": "trellis k3", "o_proj": "trellis k4"}
+        t[k][[0, 3, 4, 5, 6, 7]] = 0
+    desc = {"side": "out", "unit": 128, "rotation": "own", "solve": "hessian"}
+    matrices = {"q_proj.k2": {"format": "trellis k2", **desc}, "q_proj.k3": {"format": "trellis k3", **desc},
+                "o_proj": {"format": "trellis k4", **desc}}
     os.makedirs(tmp_path / "b" / "dense")
     write_st(str(tmp_path / "b" / "dense" / "exlr8-dense-000.safetensors"), t,
-             {**DENSE_META, "formats": json.dumps(formats)})
+             {**DENSE_META, "matrices": json.dumps(matrices)})
     got = x.load_layer(str(tmp_path / "b"), {"layers": {}, "dense": {"0": {"q_proj": 3}}}, 0, torch.float32,
                        verify=True)
     assert got.keys() == want.keys() and all(torch.equal(got[k], want[k]) for k in got)
 
 
-@pytest.mark.parametrize("change", ["missing", "unknown", "extra", "width", "code", "v2", "no-formats"])
-def test_formats_refused(tmp_path, change):
+@pytest.mark.parametrize("change", ["missing", "unknown", "extra", "code", "side", "unit", "solve", "v2", "none",
+                                    "key", "side-name", "solve-name", "no-unit", "replicated-unit", "rotation"])
+def test_matrices_refused(tmp_path, change):
     g = torch.Generator().manual_seed(4)
     t, _ = int8_matrix("o_proj", 1, 64, g)
-    formats, meta = {"o_proj": "int8 g64"}, dict(INT8_META)
+    d, meta = int8_desc(1, 64), dict(INT8_META)
+    matrices = {"o_proj": d}
     if change == "missing":
-        formats = {}
+        matrices = {}
     elif change == "unknown":
-        formats["o_proj"] = "int8 g48"
+        d["format"] = "int8 g48"
     elif change == "extra":
-        formats["q_proj"] = "bf16"
-    elif change == "width":
-        t["o_proj.record"][3] = 64              # field 3 is 0 for int8: G lives in the string
+        matrices["q_proj"] = {"format": "bf16", "side": "replicated", "solve": "copy"}
     elif change == "code":
-        t["o_proj.record"][0] = x.INT4
+        t["o_proj.record"][0] = x.INT4          # legacy fields must be 0 or agree
+    elif change == "side":
+        t["o_proj.record"][4] = 2
+    elif change == "unit":
+        t["o_proj.record"][5] = 64
+    elif change == "solve":
+        d["solve"] = "rtn"                      # the record says 1 (hessian)
     elif change == "v2":
         meta["format"] = "exlr8-v2"
-    if change != "no-formats":
-        meta["formats"] = json.dumps(formats)
+    elif change == "key":
+        d["group"] = 64
+    elif change == "side-name":
+        d["side"] = "output"
+    elif change == "solve-name":
+        d["solve"] = "gptq"
+    elif change == "no-unit":
+        del d["unit"]
+    elif change == "replicated-unit":
+        d["side"] = "replicated"
+        t["o_proj.record"][4] = 0
+    elif change == "rotation":
+        d["rotation"] = "attn_in"               # int8 has no trellis rotation
+    if change != "none":
+        meta["matrices"] = json.dumps(matrices)
     os.makedirs(tmp_path / "dense")
     write_st(str(tmp_path / "dense" / "exlr8-dense-000.safetensors"), t, meta)
     with pytest.raises(ValueError):
         x.load_layer(str(tmp_path), {"layers": {}}, 0)
+
+
+def test_matrices_rotation_names(tmp_path):
+    """A trellis matrix's rotation name agrees with legacy field 6 through `rotations`, or the default names."""
+    g = torch.Generator().manual_seed(6)
+    t = dense_trellis("q_proj", 2, "mcg", g)
+    t["q_proj.record"][6] = 2
+    for meta, name, ok in (({}, "q_resid", True), ({}, "attn_in", False),
+                           ({"rotations": "x, y"}, "y", True), ({"rotations": "x, y"}, "q_resid", False)):
+        d = {"format": "trellis k2", "side": "out", "unit": 128, "rotation": name, "solve": "hessian"}
+        root = tmp_path / f"{name}{len(meta)}"
+        os.makedirs(root / "dense")
+        write_st(str(root / "dense" / "exlr8-dense-000.safetensors"), t,
+                 {**DENSE_META, **meta, "matrices": json.dumps({"q_proj": d})})
+        if ok:
+            x.load_layer(str(root), {"layers": {}}, 0, verify=True)
+        else:
+            with pytest.raises(ValueError):
+                x.load_layer(str(root), {"layers": {}}, 0)
 
 
 @pytest.mark.parametrize("K", [4, 4.5])

@@ -490,42 +490,70 @@ def parse_format(text):
     return kinds[text], 0
 
 
-def matrix_record(f, base, formats):
-    """base's record with field 0 = its kind and field 3 = K or G, from the file's `formats` (FORMAT.md "Records")
-    or, in a file without it, from the legacy code in field 0."""
+SIDES = {"replicated": 0, "out": 1, "in": IN}
+SOLVES = {"copy": 0, "rtn": 0, "hessian": 1}
+ROTATIONS = ("attn_in", "q_resid", "mlp_in")      # legacy field 6 = 1, 2, 3 when the file has no `rotations`
+
+
+def matrix_record(f, base, matrices):
+    """base's record as the decoders read it, field 0 = its kind and field 3 = K or G, from its `matrices`
+    description (FORMAT.md "Matrix descriptions"), whose legacy fields must be 0 or agree; or, in a file without
+    `matrices`, the record's own legacy fields."""
     rec = f.get(base + ".record").clone()
-    if formats is None:
+    if matrices is None:
         if int(rec[0]) not in (TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS):
-            raise ValueError(f"{f.path}: {base} has legacy format {int(rec[0])} and the file has no formats")
+            raise ValueError(f"{f.path}: {base} has legacy format {int(rec[0])} and the file has no matrices")
         return rec
-    if base not in formats:
-        raise ValueError(f"{f.path}: formats does not name {base}")
-    kind, field3 = parse_format(formats[base])
-    if int(rec[0]) not in (0, kind if kind != INT8 else 0):
-        raise ValueError(f"{f.path}: {base} record field 0 is {int(rec[0])}, formats says {formats[base]!r}")
-    if kind in (TRELLIS, ROWS) and int(rec[3]) != field3 or kind not in (TRELLIS, ROWS) and int(rec[3]) != 0:
-        raise ValueError(f"{f.path}: {base} record field 3 is {int(rec[3])}, formats says {formats[base]!r}")
-    rec[0], rec[3] = kind, field3
+    if base not in matrices:
+        raise ValueError(f"{f.path}: matrices does not describe {base}")
+    d = matrices[base]
+    kind, field3 = parse_format(d["format"])
+    side = SIDES[d["side"]]
+    unit = d.get("unit", 0)
+    names = [x.strip() for x in f.meta["rotations"].split(",")] if "rotations" in f.meta else list(ROTATIONS)
+    rot = d.get("rotation", "own")
+    rot = 0 if rot == "own" else names.index(rot) + 1 if rot in names else None    # None: no legacy number
+    legacy = {0: 0 if kind == INT8 else kind, 3: field3 if kind in (TRELLIS, ROWS) else 0, 4: side, 5: unit, 6: rot,
+              7: SOLVES[d["solve"]]}
+    for field, want in legacy.items():
+        if int(rec[field]) != 0 and int(rec[field]) != want:
+            raise ValueError(f"{f.path}: {base} record field {field} is {int(rec[field])}, its description {d}")
+    rec[0], rec[3], rec[4], rec[5], rec[7] = kind, field3, side, unit, SOLVES[d["solve"]]
     return rec
 
 
-def file_formats(f):
-    """The file's `formats` metadata as a dict, or None. Refused in an exlr8-v2 file."""
-    text = f.meta.get("formats")
+def file_matrices(f):
+    """The file's `matrices` metadata, checked key by key, or None. Refused in an exlr8-v2 file."""
+    text = f.meta.get("matrices")
     if text is None:
         return None
     if f.meta.get("format") == "exlr8-v2":
-        raise ValueError(f"{f.path}: formats metadata (a v4 feature) in an exlr8-v2 file")
-    formats = json.loads(text)
-    if not isinstance(formats, dict) or not all(isinstance(v, str) for v in formats.values()):
-        raise ValueError(f"{f.path}: formats is not a JSON object of strings")
-    return formats
+        raise ValueError(f"{f.path}: matrices metadata (a v4 feature) in an exlr8-v2 file")
+    matrices = json.loads(text)
+    if not isinstance(matrices, dict):
+        raise ValueError(f"{f.path}: matrices is not a JSON object")
+    for base, d in matrices.items():
+        bad = None
+        if not isinstance(d, dict) or set(d) - {"format", "side", "unit", "rotation", "solve"}:
+            bad = "unknown keys"
+        elif not isinstance(d.get("format"), str) or d.get("side") not in SIDES or d.get("solve") not in SOLVES:
+            bad = "format, side or solve"
+        elif (d["side"] == "replicated") != ("unit" not in d) or "unit" in d and \
+                (not isinstance(d["unit"], int) or isinstance(d["unit"], bool) or d["unit"] < 1):
+            bad = "unit (a positive integer, absent exactly when replicated)"
+        elif "rotation" in d and (not isinstance(d["rotation"], str) or parse_format(d["format"])[0] not in
+                                  (TRELLIS, ROWS)):
+            bad = "rotation (trellis and row trellis only)"
+        if bad:
+            raise ValueError(f"{f.path}: matrices[{base!r}]: {bad}: {d}")
+        parse_format(d["format"])
+    return matrices
 
 
 def decode_dense(rec, t, device="cpu", cb="mcg"):
     """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record as matrix_record gives it (field 0
-    the kind, field 3 K or G), t: {suffix: tensor} as stored, with a trellis matrix's data under `trellis` whatever
-    its codebook cb."""
+    the kind, field 3 K or G, field 4 the side), t: {suffix: tensor} as stored, with a trellis matrix's data under
+    `trellis` whatever its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
     if fmt not in DATA:
         raise ValueError(f"dense format {fmt} is not one of {sorted(DATA)}")
@@ -619,7 +647,7 @@ def dense_matrices(f, widths=None):
     or `M.kK` for a matrix stored at several widths (FORMAT.md "Dense widths"), K picked by widths, {stored name: K}
     from the manifest's `dense` object."""
     names = set(f.names())
-    formats = file_formats(f)
+    matrices = file_matrices(f)
     stored = {}
     for n in names:
         if not n.endswith(".record"):
@@ -630,10 +658,10 @@ def dense_matrices(f, widths=None):
             stored.setdefault(m, {})[w] = base
         else:
             stored[base] = {None: base}
-    if formats is not None:
+    if matrices is not None:
         bases = {b for ws in stored.values() for b in ws.values()}
-        if set(formats) - bases:
-            raise ValueError(f"{f.path}: formats names {sorted(set(formats) - bases)}, which the file does not hold")
+        if set(matrices) - bases:
+            raise ValueError(f"{f.path}: matrices describes {sorted(set(matrices) - bases)}, which it does not hold")
     widths = widths or {}
     extra = set(widths) - {m for m, ws in stored.items() if None not in ws}
     if extra:
@@ -643,7 +671,7 @@ def dense_matrices(f, widths=None):
 
     def tensors(base):
         """base's codebook and {data suffix: tensor name}, checked against the `codebooks` metadata."""
-        fmt = int(matrix_record(f, base, formats)[0])
+        fmt = int(matrix_record(f, base, matrices)[0])
         codes = "rows" if fmt == ROWS else "trellis"
         found = [n[len(f"{base}.{codes}."):] for n in names if n.startswith(f"{base}.{codes}.")]
         cb = found[0] if found else "mcg"
@@ -674,10 +702,10 @@ def load_matrices(f, prefix, dtype, device, verify, raw=False, widths=None):
     the manifest's `dense` entry for this file. With raw, FP8 32x32 block matrices come back as the source's
     (weight, scale), MXFP8 as (weight, scale) too, and BF16 as stored."""
     mats, owned = dense_matrices(f, widths)
-    formats = file_formats(f)
+    matrices = file_matrices(f)
     out = {}
     for m, (base, cb, data) in mats.items():
-        rec = matrix_record(f, base, formats)
+        rec = matrix_record(f, base, matrices)
         fmt, side = int(rec[0]), int(rec[4])
         t = {s: f.get(n) for s, n in data.items()}
         if verify:
