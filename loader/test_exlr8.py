@@ -224,7 +224,8 @@ def test_requires():
 
 # ---------------------------------------------------------------- a mixed width file, end to end
 
-ST_DTYPES = {torch.int64: "I64", torch.int8: "I8", torch.uint8: "U8", torch.float16: "F16"}
+ST_DTYPES = {torch.int64: "I64", torch.int8: "I8", torch.uint8: "U8", torch.float16: "F16",
+             torch.bfloat16: "BF16", torch.float32: "F32"}
 
 
 def write_st(path, tensors, meta):
@@ -566,3 +567,321 @@ def test_row_trellis(tmp_path, K):
     v = x.codebook(x.ring_states(x.tile_bits(tiles, K), ends, 20), "pmcgx").reshape(out, inp)
     want = (v.reshape(-1, 128) @ x.hadamard(128)).view(out, inp) * suh.float() * svh.float().unsqueeze(1)
     assert torch.equal(got, want)
+
+
+# ---------------------------------------------------------------- multi-group dense releases
+
+KEEP_META = {"format", "contents", "record", "checksum", "scheme", "layer", "group", "model_profile"}
+
+
+def _u64_i64(sums):
+    return ("U64", torch.tensor([c - 2 ** 64 if c >= 2 ** 63 else c for c in sums], dtype=torch.int64))
+
+
+def _dense_int4(base, out, inp, side, g):
+    q4_rm = torch.randint(0, 256, (out, inp // 2), dtype=torch.uint8, generator=g)
+    s4_rm = (torch.rand(out, inp // 32, generator=g) * 0.2 + 0.05).half()
+    if side == x.IN:
+        q4 = q4_rm.reshape(out, -1, 64).transpose(0, 1).contiguous()
+        s4 = s4_rm.reshape(out, -1, 4).transpose(0, 1).contiguous()
+        sums = [x.xxh64(q4[b], s4[b]) for b in range(inp // 128)]
+    else:
+        q4, s4 = q4_rm, s4_rm
+        sums = [x.xxh64(q4[128 * b:128 * b + 128], s4[128 * b:128 * b + 128]) for b in range(-(-out // 128))]
+    rec = torch.tensor([x.INT4, out, inp, 0, side, 128, 0, 1], dtype=torch.int64)
+    return {f"{base}.record": rec, f"{base}.checksum": _u64_i64(sums), f"{base}.q4": q4, f"{base}.s4": s4}
+
+
+def _dense_trellis_side(base, out, inp, K, side, g):
+    ent_n = inp // 128 if side == x.IN else out // 128
+    ent_b = (out if side == x.IN else inp) * 128 * K // 8
+    ent = torch.randint(0, 256, (ent_n, ent_b), dtype=torch.uint8, generator=g)
+    suh = (torch.randn(inp, generator=g).sign() * (torch.rand(inp, generator=g) * 0.5 + 0.2)).half()
+    svh = (torch.randn(out, generator=g).sign() * (torch.rand(out, generator=g) * 0.5 + 0.2)).half()
+    if side == x.IN:
+        sums = [x.xxh64(ent[b], suh[128 * b:128 * b + 128], svh) for b in range(ent_n)]
+    else:
+        sums = [x.xxh64(ent[b], svh[128 * b:128 * b + 128], suh) for b in range(ent_n)]
+    rec = torch.tensor([x.TRELLIS, out, inp, K, side, 128, 0, 1], dtype=torch.int64)
+    return {f"{base}.record": rec, f"{base}.checksum": _u64_i64(sums),
+            f"{base}.trellis": ent, f"{base}.suh": suh, f"{base}.svh": svh}
+
+
+def _dense_fp8_row(base, out, inp, g):
+    w = torch.randn(out, inp, generator=g) * 0.1
+    amax = w.abs().amax(dim=1)
+    scale = torch.where(amax > 0, amax / 448.0, torch.ones_like(amax))
+    fp8 = (w / scale.unsqueeze(1)).clamp(-448, 448).to(torch.float8_e4m3fn).view(torch.uint8)
+    sums = [x.xxh64(fp8[128 * b:128 * b + 128], scale[128 * b:128 * b + 128]) for b in range(-(-out // 128))]
+    rec = torch.tensor([x.FP8_ROW, out, inp, 0, 1, 128, 0, 0], dtype=torch.int64)
+    return {f"{base}.record": rec, f"{base}.checksum": _u64_i64(sums), f"{base}.fp8": fp8, f"{base}.scale": scale}
+
+
+def _dense_bf16(base, out, inp, g):
+    bf16 = (torch.randn(out, inp, generator=g) * 0.05).to(torch.bfloat16)
+    sums = [x.xxh64(bf16[128 * b:128 * b + 128]) for b in range(-(-out // 128))]
+    rec = torch.tensor([x.BF16, out, inp, 0, 0, 0, 0, 0], dtype=torch.int64)
+    return {f"{base}.record": rec, f"{base}.checksum": _u64_i64(sums), f"{base}.bf16": ("BF16", bf16)}
+
+
+def _strip_dir(src, dst):
+    """Simulate strip_meta.py: keep only KEEP_META keys, leaving data sections byte-identical."""
+    os.makedirs(dst, exist_ok=True)
+    for n in sorted(os.listdir(src)):
+        if not n.endswith(".safetensors"):
+            continue
+        with open(os.path.join(src, n), "rb") as f:
+            hlen = struct.unpack("<Q", f.read(8))[0]
+            hdr = json.loads(f.read(hlen))
+            body = f.read()
+        hdr["__metadata__"] = {k: v for k, v in sorted(hdr.get("__metadata__", {}).items()) if k in KEEP_META}
+        raw = json.dumps(hdr, separators=(",", ":")).encode()
+        raw += b" " * (-len(raw) % 8)
+        with open(os.path.join(dst, n), "wb") as f:
+            f.write(struct.pack("<Q", len(raw)) + raw + body)
+
+
+def test_load_dense_model_embedding_gemma2(tmp_path):
+    g = torch.Generator().manual_seed(41)
+    base_meta = {"format": "exlr8-v2", "scheme": "exlr8-e4m3-v2", "model_profile": "embedding_gemma2",
+                 "encoder_commit": "abc", "hessian": "eg2-v2"}
+    rel = tmp_path / "release"
+    os.makedirs(rel)
+    write_st(str(rel / "exlr8-dense-text-000.safetensors"), {
+        **_dense_trellis_side("self_attn.q_proj", 128, 128, 4, 1, g),
+        **_dense_int4("self_attn.o_proj", 128, 128, x.IN, g),
+        "input_layernorm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }, {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    write_st(str(rel / "exlr8-dense-vision-002.safetensors"), {
+        **_dense_trellis_side("self_attn.q_proj.linear", 128, 128, 4, 1, g),
+    }, {**base_meta, "contents": "dense", "group": "vision", "layer": "2"})
+    write_st(str(rel / "exlr8-dense-audio-001.safetensors"), {
+        **_dense_trellis_side("self_attn.post.linear", 128, 128, 4, x.IN, g),
+    }, {**base_meta, "contents": "dense", "group": "audio", "layer": "1"})
+    write_st(str(rel / "exlr8-dense-global-000.safetensors"), {
+        **_dense_trellis_side("language_model.embedding_projection", 128, 128, 4, 1, g),
+        "language_model.norm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }, {**base_meta, "contents": "dense", "group": "global", "layer": "0"})
+    write_st(str(rel / "exlr8-vocab.safetensors"), {
+        **_dense_fp8_row("embed_tokens", 200, 128, g),
+    }, {**base_meta, "contents": "vocab"})
+
+    unstripped = x.load_dense_model(str(rel), dtype=torch.float32, verify=True)
+    assert sorted(unstripped) == [
+        "audio_tower.layers.1.self_attn.post.linear.weight",
+        "language_model.embed_tokens.weight",
+        "language_model.embedding_projection.weight",
+        "language_model.layers.0.input_layernorm.weight",
+        "language_model.layers.0.self_attn.o_proj.weight",
+        "language_model.layers.0.self_attn.q_proj.weight",
+        "language_model.norm.weight",
+        "vision_tower.encoder.layers.2.self_attn.q_proj.linear.weight",
+    ]
+    assert unstripped["language_model.embed_tokens.weight"].shape == (200, 128)
+    assert unstripped["language_model.layers.0.input_layernorm.weight"].dtype == torch.bfloat16
+
+    stripped_dir = tmp_path / "stripped"
+    _strip_dir(str(rel), str(stripped_dir))
+    stripped = x.load_dense_model(str(stripped_dir), dtype=torch.float32, verify=True)
+    assert list(stripped) == list(unstripped)
+    for k in unstripped:
+        assert torch.equal(unstripped[k], stripped[k]), k
+
+
+def test_load_dense_model_qwen3vl_and_parity(tmp_path):
+    """Multi-group qwen3_vl release (text, vision incl. 8B 4304 FP8_ROW side=OUT, global incl. BF16 pos_embed &
+    5D patch_embed conv, vocab incl. embed_tokens + norm.weight), before and after strip_meta, plus bit-exact parity
+    against dense_format.dequant."""
+    g = torch.Generator().manual_seed(42)
+    base_meta = {"format": "exlr8-v2", "scheme": "exlr8-e4m3-v2", "model_profile": "qwen3_vl",
+                 "encoder_commit": "def", "hessian": "qwen3vl-v1"}
+    rel = tmp_path / "release"
+    os.makedirs(rel)
+
+    text_t = {
+        **_dense_trellis_side("self_attn.q_proj", 128, 128, 4, 1, g),
+        **_dense_trellis_side("self_attn.o_proj", 128, 128, 4, x.IN, g),
+        **_dense_int4("mlp.down_proj", 128, 256, x.IN, g),
+        "input_layernorm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }
+    vision_t = {
+        **_dense_trellis_side("attn.qkv", 384, 128, 4, 1, g),
+        **_dense_fp8_row("mlp.linear_fc1", 4304, 128, g),
+        **_dense_fp8_row("mlp.linear_fc2", 128, 4304, g),
+        "mlp.linear_fc1.bias": ("BF16", torch.zeros(4304, dtype=torch.bfloat16)),
+    }
+    global_t = {
+        **_dense_bf16("model.visual.pos_embed", 256, 128, g),
+        **_dense_trellis_side("model.visual.merger.linear_fc1", 256, 256, 4, 1, g),
+        **_dense_trellis_side("model.visual.deepstack_merger_list.0.linear_fc2", 128, 256, 4, x.IN, g),
+        "model.visual.patch_embed.proj.weight": ("BF16", torch.randn(128, 3, 2, 16, 16, generator=g).to(torch.bfloat16)),
+    }
+    vocab_t = {
+        **_dense_fp8_row("embed_tokens", 300, 128, g),
+        "norm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }
+    write_st(str(rel / "exlr8-dense-text-000.safetensors"), text_t,
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    write_st(str(rel / "exlr8-dense-vision-000.safetensors"), vision_t,
+             {**base_meta, "contents": "dense", "group": "vision", "layer": "0"})
+    write_st(str(rel / "exlr8-dense-global-000.safetensors"), global_t,
+             {**base_meta, "contents": "dense", "group": "global", "layer": "0"})
+    write_st(str(rel / "exlr8-vocab.safetensors"), vocab_t, {**base_meta, "contents": "vocab"})
+
+    loaded = x.load_dense_model(str(rel), dtype=torch.float32, verify=True)
+    assert sorted(loaded) == [
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.layers.0.input_layernorm.weight",
+        "model.language_model.layers.0.mlp.down_proj.weight",
+        "model.language_model.layers.0.self_attn.o_proj.weight",
+        "model.language_model.layers.0.self_attn.q_proj.weight",
+        "model.language_model.norm.weight",
+        "model.visual.blocks.0.attn.qkv.weight",
+        "model.visual.blocks.0.mlp.linear_fc1.bias",
+        "model.visual.blocks.0.mlp.linear_fc1.weight",
+        "model.visual.blocks.0.mlp.linear_fc2.weight",
+        "model.visual.deepstack_merger_list.0.linear_fc2.weight",
+        "model.visual.merger.linear_fc1.weight",
+        "model.visual.patch_embed.proj.weight",
+        "model.visual.pos_embed.weight",
+    ]
+    assert loaded["model.visual.blocks.0.mlp.linear_fc1.weight"].shape == (4304, 128)
+    assert loaded["model.visual.blocks.0.mlp.linear_fc2.weight"].shape == (128, 4304)
+    assert loaded["model.visual.pos_embed.weight"].shape == (256, 128)
+    assert loaded["model.visual.patch_embed.proj.weight"].shape == (128, 3, 2, 16, 16)
+
+    # Identical after strip_meta.py
+    stripped_dir = tmp_path / "stripped"
+    _strip_dir(str(rel), str(stripped_dir))
+    loaded_stripped = x.load_dense_model(str(stripped_dir), dtype=torch.float32, verify=True)
+    assert list(loaded_stripped) == list(loaded)
+    for k in loaded:
+        assert torch.equal(loaded[k], loaded_stripped[k]), k
+
+    # Also works under root/dense/ layout
+    nested = tmp_path / "nested"
+    _strip_dir(str(rel), str(nested / "dense"))
+    loaded_nested = x.load_dense_model(str(nested), dtype=torch.bfloat16, verify=True)
+    for k in loaded:
+        want = loaded[k].to(torch.bfloat16) if loaded[k].dtype == torch.float32 else loaded[k]
+        assert torch.equal(loaded_nested[k], want), k
+
+    # Bit-exact parity against dense_format.dequant when exlr8quant sibling repo is available
+    for cand in ("exlr8quant-qwen3vl", "exlr8quant"):
+        df_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                              cand, "requant", "dense")
+        if os.path.isfile(os.path.join(df_dir, "dense_format.py")):
+            import importlib.util
+            import types
+            spec = importlib.util.spec_from_file_location("_df_parity", os.path.join(df_dir, "dense_format.py"))
+            D = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(D)
+            had = x.hadamard(128, "cpu")
+            Q = types.SimpleNamespace(
+                had_k=128, had_n=128,
+                preapply_had_l=lambda w, n: (had @ w.view(-1, n, w.shape[1])).view_as(w),
+                preapply_had_r=lambda w, n: (w.view(w.shape[0], -1, n) @ had).view_as(w),
+            )
+            for fname, pre in (("exlr8-dense-text-000.safetensors", "model.language_model.layers.0."),
+                               ("exlr8-dense-vision-000.safetensors", "model.visual.blocks.0."),
+                               ("exlr8-dense-global-000.safetensors", ""),
+                               ("exlr8-vocab.safetensors", None)):
+                sf = x.SafeFile(str(rel / fname))
+                mats, _ = x.dense_matrices(sf)
+                for m, (base, _cb, data_map) in mats.items():
+                    rec = sf.get(base + ".record").numpy()
+                    tdata = {s: sf.get(n) for s, n in data_map.items()}
+                    w_df, _ = D.dequant(rec, tdata, Q, "cpu", tiles_from_file=True)
+                    hf_name = ("model.language_model.embed_tokens.weight" if pre is None else pre + m + ".weight")
+                    assert torch.equal(loaded[hf_name], w_df), (fname, m)
+            break
+
+    # Checksum verification catches corruption
+    bad_path = str(stripped_dir / "exlr8-dense-vision-000.safetensors")
+    sf = x.SafeFile(bad_path)
+    off = sf.start + sf.header["mlp.linear_fc2.fp8"]["data_offsets"][0]
+    with open(bad_path, "r+b") as fh:
+        fh.seek(off)
+        b = fh.read(1)
+        fh.seek(off)
+        fh.write(bytes([b[0] ^ 1]))
+    with pytest.raises(ValueError, match="checksum"):
+        x.load_dense_model(str(stripped_dir), verify=True)
+
+
+def test_load_dense_model_errors(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        x.load_dense_model(str(tmp_path))
+    g = torch.Generator().manual_seed(1)
+    write_st(str(tmp_path / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("m", 128, 128, g),
+             {"format": "exlr8-v2", "contents": "dense", "model_profile": "unknown_prof", "group": "text", "layer": "0"})
+    with pytest.raises(ValueError, match="unknown model_profile"):
+        x.load_dense_model(str(tmp_path))
+    write_st(str(tmp_path / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("m", 128, 128, g),
+             {"format": "exlr8-v2", "contents": "dense", "model_profile": "qwen3_vl", "group": "bogus", "layer": "0"})
+    with pytest.raises(ValueError, match="unknown group"):
+        x.load_dense_model(str(tmp_path))
+
+
+def test_load_dense_model_precedence_and_split_layout(tmp_path):
+    """root/dense/ takes precedence over root/, and split layouts (dense/ shards + root vocab) are discovered."""
+    g = torch.Generator().manual_seed(77)
+    base_meta = {"format": "exlr8-v2", "model_profile": "qwen3_vl"}
+
+    # 1. Both root/ and root/dense/ populated -> root/dense/ wins
+    both = tmp_path / "both"
+    os.makedirs(both / "dense")
+    write_st(str(both / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("from_root", 64, 64, g),
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    write_st(str(both / "dense" / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("from_dense", 64, 64, g),
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    got_both = x.load_dense_model(str(both), dtype=torch.float32, verify=True)
+    assert "model.language_model.layers.0.from_dense.weight" in got_both
+    assert "model.language_model.layers.0.from_root.weight" not in got_both
+
+    # 2. Split layout: dense shards in root/dense/, vocab in root/
+    split = tmp_path / "split"
+    os.makedirs(split / "dense")
+    write_st(str(split / "dense" / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("self_attn.q_proj", 64, 64, g),
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    write_st(str(split / "exlr8-vocab.safetensors"),
+             _dense_fp8_row("embed_tokens", 64, 64, g),
+             {**base_meta, "contents": "vocab"})
+    got_split = x.load_dense_model(str(split), dtype=torch.float32, verify=True)
+    assert sorted(got_split) == [
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.layers.0.self_attn.q_proj.weight",
+    ]
+
+    # 3. Mixed model_profile fails closed
+    mixed = tmp_path / "mixed"
+    os.makedirs(mixed)
+    write_st(str(mixed / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("p", 64, 64, g),
+             {"format": "exlr8-v2", "contents": "dense", "model_profile": "qwen3_vl", "group": "text", "layer": "0"})
+    write_st(str(mixed / "exlr8-dense-vision-000.safetensors"),
+             _dense_bf16("p", 64, 64, g),
+             {"format": "exlr8-v2", "contents": "dense", "model_profile": "embedding_gemma2",
+              "group": "vision", "layer": "0"})
+    with pytest.raises(ValueError, match="conflicts"):
+        x.load_dense_model(str(mixed))
+
+
+@pytest.mark.parametrize("fmt,data", [
+    (x.MXFP8, {"fp8": torch.zeros(64, 256, dtype=torch.uint8), "e8m0": torch.zeros(64, 8, dtype=torch.uint8)}),
+    (x.FP8_BLOCK, {"fp8": torch.zeros(64, 256, dtype=torch.uint8), "scale": torch.ones(1, 2)}),
+    (x.FP8_ROW, {"fp8": torch.zeros(64, 256, dtype=torch.uint8), "scale": torch.ones(64)}),
+    (x.BF16, {"bf16": torch.zeros(64, 256, dtype=torch.bfloat16)}),
+    (x.FP32, {"fp32": torch.zeros(64, 256, dtype=torch.float32)}),
+    (x.ROWS, {"rows": torch.zeros(64, 128, dtype=torch.uint8), "svh": torch.ones(64, dtype=torch.float16),
+              "suh": torch.ones(256, dtype=torch.float16)}),
+])
+def test_dense_checksums_rejects_side_in_for_row_major_formats(fmt, data):
+    rec = torch.tensor([fmt, 64, 256, 4 if fmt == x.ROWS else 0, x.IN, 128, 0, 0], dtype=torch.int64)
+    with pytest.raises(ValueError, match="row-major"):
+        x.dense_checksums(rec, data)
