@@ -25,6 +25,35 @@ import torch
 GLM53 = {"hidden_size": 6144, "moe_intermediate_size": 2048, "n_routed_experts": 256, "tensor_prefix": "model.layers.",
          "expert_names": {**{p: f"mlp.experts.{{e}}.{p}_proj" for p in ("gate", "up", "down")},
                           **{f"shared.{p}": f"mlp.shared_experts.{p}_proj" for p in ("gate", "up", "down")}}}
+# Multi-group dense release profiles (model_profile metadata -> group HF prefixes and vocab HF names).
+# Vocab matrices (embed_tokens, lm_head) map to their HF module prefix (load_matrices appends ".weight");
+# vocab vectors (norm.weight) map to their full HF tensor name.
+DENSE_PROFILES = {
+    "glm": {
+        "groups": {"layers": "model.layers.{L}."},
+        "vocab": {"embed_tokens": "model.embed_tokens", "lm_head": "lm_head", "norm.weight": "model.norm.weight"},
+    },
+    "embedding_gemma2": {
+        "groups": {
+            "text": "language_model.layers.{L}.",
+            "vision": "vision_tower.encoder.layers.{L}.",
+            "audio": "audio_tower.layers.{L}.",
+            "global": "",
+        },
+        "vocab": {"embed_tokens": "language_model.embed_tokens"},
+    },
+    "qwen3_vl": {
+        "groups": {
+            "text": "model.language_model.layers.{L}.",
+            "vision": "model.visual.blocks.{L}.",
+            "global": "",
+        },
+        "vocab": {
+            "embed_tokens": "model.language_model.embed_tokens",
+            "norm.weight": "model.language_model.norm.weight",
+        },
+    },
+}
 PROJS = ("gate", "up", "down")
 # Native stores (FORMAT.md "Native stores"): weights per code byte, and the E8M0 scale block (out, in).
 NATIVE = {"mxfp4": (2, (1, 32)), "fp8b32": (1, (32, 32))}
@@ -476,7 +505,7 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
     a trellis matrix's data under `trellis` whatever its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
     K = K if K >= 0 else -K / 2      # a half width is written as -2K
-    t = {k: v.to(device) for k, v in t.items()}
+    t = {k: (v.clone() if v.device.type == "cpu" and str(device) != "cpu" else v).to(device) for k, v in t.items()}
     if fmt == ROWS:         # tile t of row r: values 256t.. in stream order, rotated along the row only
         check_width(K, cb)
         w, perm, had = torch.empty(out, inp, device=device), tile_perm().to(device), hadamard(128, device)
@@ -494,7 +523,7 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
             T = torch.cat([tiles_in_major(ent[g], K, out, cb) for g in range(ent.shape[0])], 0)
         else:               # entry g = output columns 128g.., tiles as gate/up halves
             T = torch.cat([tiles_out_major(ent[g], K, inp, 128, cb) for g in range(ent.shape[0])], 1)
-        return reconstruct(T, t["suh"], t["svh"]).T
+        return reconstruct(T, t["suh"], t["svh"]).T.contiguous()
     if fmt == INT4:
         q4, s4 = t["q4"], t["s4"]
         if side == IN:      # stored [in/128, out, 64] and [in/128, out, 4]
@@ -632,7 +661,7 @@ def xxh64(*parts):
     import xxhash
     h = xxhash.xxh64(seed=0)
     for p in parts:
-        h.update(p.contiguous().cpu().view(torch.uint8).numpy().tobytes())
+        h.update(p.contiguous().cpu().reshape(-1).view(torch.uint8).numpy().tobytes())
     return h.intdigest()
 
 
@@ -707,12 +736,85 @@ def load_layer(root, manifest, L, dtype=torch.bfloat16, device="cpu", verify=Fal
     return out
 
 
-def load_vocab(root, dtype=torch.bfloat16, device="cpu", verify=False, raw=False):
-    f = SafeFile(os.path.join(root, "dense", "exlr8-vocab.safetensors"))
-    names = {"embed_tokens": "model.embed_tokens", "lm_head": "lm_head", "norm.weight": "model.norm.weight"}
+def _vocab_names(f):
     if "hf_names" in f.meta:
-        names = json.loads(f.meta["hf_names"])
+        return json.loads(f.meta["hf_names"])
+    prof_name = f.meta.get("model_profile") or "glm"
+    if prof_name not in DENSE_PROFILES:
+        raise ValueError(f"{f.path}: unknown model_profile {prof_name!r}")
+    return DENSE_PROFILES[prof_name]["vocab"]
+
+
+def _dense_prefix(f):
+    """HF tensor name prefix for a dense layer file, from hf_prefix or (model_profile, group, layer) metadata."""
+    if "hf_prefix" in f.meta:
+        return f.meta["hf_prefix"]
+    prof_name = f.meta.get("model_profile") or "glm"
+    if prof_name not in DENSE_PROFILES:
+        raise ValueError(f"{f.path}: unknown model_profile {prof_name!r}")
+    groups = DENSE_PROFILES[prof_name]["groups"]
+    group = f.meta.get("group")
+    if group is None:
+        if prof_name == "glm":
+            group = "layers"
+        else:
+            raise ValueError(f"{f.path}: missing group metadata for profile {prof_name!r}")
+    if group not in groups:
+        raise ValueError(f"{f.path}: unknown group {group!r} for profile {prof_name!r}")
+    if "layer" not in f.meta:
+        raise ValueError(f"{f.path}: missing layer metadata")
+    return groups[group].format(L=int(f.meta["layer"]))
+
+
+def load_vocab(root, dtype=torch.bfloat16, device="cpu", verify=False, raw=False):
+    path = os.path.join(root, "dense", "exlr8-vocab.safetensors")
+    if not os.path.isfile(path):
+        alt = os.path.join(root, "exlr8-vocab.safetensors")
+        if os.path.isfile(alt):
+            path = alt
+    f = SafeFile(path)
+    check_format(f)
+    names = _vocab_names(f)
     return load_matrices(f, lambda n: names.get(n, n), dtype, device, verify, raw)
+
+
+def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
+    """Decode a multi-group dense release directory (exlr8-dense-<group>-LLL.safetensors and exlr8-vocab.safetensors,
+    at root or root/dense) into {hf_tensor_name: tensor} on CPU. Maps stored names to HF names using model_profile,
+    group and layer metadata (preserved by strip_meta.py), supporting embedding_gemma2, qwen3_vl and single-group glm
+    dense releases. device is the compute device used during decoding."""
+    def find_files(d):
+        if not os.path.isdir(d):
+            return []
+        return sorted(
+            os.path.join(d, n) for n in os.listdir(d)
+            if n.endswith(".safetensors") and (n.startswith("exlr8-dense-") or n == "exlr8-vocab.safetensors")
+        )
+
+    files = find_files(root)
+    if not files:
+        files = find_files(os.path.join(root, "dense"))
+    if not files:
+        raise FileNotFoundError(f"{root}: no exlr8-dense-*.safetensors or exlr8-vocab.safetensors found")
+
+    out = {}
+    for path in files:
+        f = SafeFile(path)
+        check_format(f)
+        contents = f.meta.get("contents")
+        if contents == "vocab" or (contents is None and os.path.basename(path) == "exlr8-vocab.safetensors"):
+            names = _vocab_names(f)
+            tensors = load_matrices(f, lambda n: names.get(n, n), dtype, device, verify)
+        elif contents in ("dense", None):
+            pre = _dense_prefix(f)
+            tensors = load_matrices(f, lambda n: pre + n, dtype, device, verify)
+        else:
+            raise ValueError(f"{f.path}: unexpected contents metadata {contents!r}")
+        dup = set(out) & set(tensors)
+        if dup:
+            raise ValueError(f"{f.path}: duplicate HF tensor names {sorted(dup)[:5]}")
+        out.update(tensors)
+    return out
 
 
 def main():
