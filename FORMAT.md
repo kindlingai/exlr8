@@ -8,7 +8,7 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 |---|---|---|
 | v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
 | v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
-| v4 | widths K0.5-K6 with pair-codebook half widths, the pmul1x codebook, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths | `exlr8-v4` |
+| v4 | widths K0.5-K6 with pair-codebook half widths, the pmul1x codebook, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths, [int8 dense groups](#int8-groups) | `exlr8-v4` |
 
 A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
 features are a subset; a v2 reader refuses v4 files by their `format`.
@@ -379,9 +379,9 @@ stored names.
 
 | field | values |
 |---|---|
-| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block, 9 row trellis |
+| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block, 9 row trellis, 10 int8 gG |
 | 1 out, 2 in | full matrix shape |
-| 3 K | trellis width, else 0; a half-integer K as −2K (−9 for K4.5) |
+| 3 K | trellis width; a half-integer K as −2K (−9 for K4.5). int8 gG: the group size G. Else 0 |
 | 4 sharded side | 0 replicated, 1 output channels, 2 input channels |
 | 5 channels per sharding unit | 0 if replicated |
 | 6 shared input rotation (trellis) | 0 own; i ≥ 1: entry i of metadata `rotations` (absent: 1 `attn_in`, 2 `q_resid`, 3 `mlp_in`) |
@@ -398,6 +398,7 @@ stored names.
 | 7 FP32 | `fp32` [out, in] | as stored |
 | 8 FP8 32×32 block | `fp8` U8, `e8m0` U8; side 2: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
 | 9 row trellis | `rows` U8 [out, in/256 · 32K], `suh` F16 [in], `svh` F16 [out] | see [Row trellis](#row-trellis) |
+| 10 int8 gG | `q8` I8, `s8` F16; side 2: [in/128, out, 128], [in/128, out, 128/G]; else [out, in], [out, in/G] | q8 · s8, one scale per G consecutive inputs; see [int8 groups](#int8-groups) |
 
 | file | contents |
 |---|---|
@@ -407,7 +408,8 @@ stored names.
 | `exlr8-split-NAME.pPPP` | `M.record` (full shape) + rows [r0, r1) of M's row-major data tensors + `M.checksum` of those rows (r0 a multiple of 128); metadata `rows` = `r0-r1`, `parts`, and for a layer's matrix `layer` and NAME = `LLL.<stored name>` |
 
 Dense checksum: one U64 per 128-channel block of the sharded side (per 128 output rows if replicated), xxhash64 seed 0
-over that block's rows of each data tensor (int4 side 2: entry b of `q4` then of `s4`; FP8 block: scale row b;
+over that block's rows of each data tensor (int4 and int8 side 2: entry b of `q4` then of `s4`, or of `q8` then of
+`s8`; FP8 block: scale row b;
 trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; row trellis: rows 128b.. of
 `rows` ‖ `svh` of those rows ‖ the whole `suh`; FP8 32×32 block: rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`, or
 entry b of each on side 2).
@@ -426,6 +428,24 @@ where Hb applies the 128 × 128 Hadamard to each run of 128 values, as in the tr
 column signs. The record gives sharded side 1 and 1 channel per sharding unit (any row split works), K in field 3,
 and the codebook names `rows` as it names `trellis` (`rows.pmcgx`). A table whose rows hold one 256-value slice per
 layer, as Gemma 4's per-layer embeddings do, reads one tile per layer per token.
+
+### int8 groups
+
+Format 10 stores a matrix as signed 8-bit codes with one scale per group of G consecutive inputs in a row:
+
+W[r, c] = q8[r, c] · s8[r, ⌊c / G⌋]
+
+- G is a power of two from 16 to 128 (record field 3), so a group never crosses a side-2 entry of 128 inputs. `in`
+  is a multiple of G, and of 128 on side 2.
+- `q8` is in [−127, 127]. −128 is not a code: refuse a matrix that holds it.
+- `s8` is a finite fp16 ≥ 0. A group whose scale is 0 decodes to zeros whatever its codes.
+- The product is exact in fp32 (7 + 11 significant bits), so every decoder gets the same weights. An int8 kernel can
+  read `q8` as stored and apply `s8` to each group's partial sums.
+
+Record field 7 says how the codes were chosen. 0: round to nearest, s8 = fp16(max |w| over the group / 127),
+q8 = clamp(round-half-even(w / s8), −127, 127). 1: GPTQ against the matrix's input Hessian, columns in input order, each
+group's scale set by the same rule from the group's error-corrected weights when the solve reaches its first column.
+The decode is the same for both.
 
 ### Dense codebooks
 

@@ -387,6 +387,60 @@ def test_dense_widths_refused(tmp_path, dense, meta):
         x.load_layer(str(tmp_path), {"layers": {}, "dense": {"0": dense}}, 0)
 
 
+def int8_matrix(base, side, G, g, out=256, inp=384):
+    """An int8 gG matrix (FORMAT.md "int8 groups") on output side 1 or input side 2, its weight computed directly
+    from the row-major codes and scales, and its checksum by the spec's wording."""
+    q = torch.randint(-127, 128, (out, inp), dtype=torch.int8, generator=g)
+    sc = torch.rand(out, inp // G, generator=g).half()
+    sc[0, 0] = 0                                                # a zero scale decodes to zeros
+    want = q.float() * sc.float().repeat_interleave(G, 1)
+    if side == 2:       # [in/128, out, 128] and [in/128, out, 128/G]
+        q8 = q.view(out, inp // 128, 128).transpose(0, 1).contiguous()
+        s8 = sc.view(out, inp // 128, 128 // G).transpose(0, 1).contiguous()
+        sums = [x.xxh64(q8[b], s8[b]) for b in range(inp // 128)]
+    else:
+        q8, s8 = q, sc
+        sums = [x.xxh64(q8[128 * b:128 * b + 128], s8[128 * b:128 * b + 128]) for b in range(out // 128)]
+    t = {f"{base}.record": torch.tensor([x.INT8, out, inp, G, side, 128, 0, 1]),
+         f"{base}.checksum": ("U64", torch.tensor([c - 2 ** 64 if c >= 2 ** 63 else c for c in sums])),
+         f"{base}.q8": q8, f"{base}.s8": s8}
+    return t, want
+
+
+INT8_META = {"format": "exlr8-v4", "layer": "0", "tensor_prefix": "m."}
+
+
+@pytest.mark.parametrize("side", [1, 2])
+@pytest.mark.parametrize("G", [16, 32, 64, 128])
+def test_int8_groups(tmp_path, side, G):
+    g = torch.Generator().manual_seed(G + side)
+    t, want = int8_matrix("o_proj", side, G, g)
+    os.makedirs(tmp_path / "dense")
+    write_st(str(tmp_path / "dense" / "exlr8-dense-000.safetensors"), t, INT8_META)
+    got = x.load_layer(str(tmp_path), {"layers": {}}, 0, torch.float32, verify=True)
+    assert torch.equal(got["m.0.o_proj.weight"], want)
+    assert not got["m.0.o_proj.weight"][0, :G].any()
+
+
+@pytest.mark.parametrize("change", ["code", "scale", "nan", "group", "format"])
+def test_int8_groups_refused(change):
+    g = torch.Generator().manual_seed(3)
+    t, _ = int8_matrix("m", 1, 64, g)
+    rec, data = t["m.record"].clone(), {"q8": t["m.q8"].clone(), "s8": t["m.s8"].clone()}
+    if change == "code":
+        data["q8"][1, 1] = -128
+    elif change == "scale":
+        data["s8"][1, 1] = -1
+    elif change == "nan":
+        data["s8"][1, 1] = float("nan")
+    elif change == "group":
+        rec[3] = 48
+    else:
+        rec[0] = 11
+    with pytest.raises(ValueError):
+        x.decode_dense(rec, data)
+
+
 @pytest.mark.parametrize("K", [4, 4.5])
 def test_row_trellis(tmp_path, K):
     """Each row's tiles decode in stream order and rotate along the row alone (FORMAT.md "Row trellis")."""

@@ -45,11 +45,11 @@ CODEBOOKS.update({f"{k}-f16": v for k, v in list(CODEBOOKS.items())})
 BYTE_SUM = ("mul1", "pmul1x")
 FORMATS = ("exlr8-v2", "exlr8-v4")
 MIXING = ("none", "width", "expert")
-TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS = 1, 2, 3, 4, 5, 6, 7, 8, 9  # record field 0
+TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS, INT8 = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10  # field 0
 IN = 2                                  # record field 4: 0 replicated, 1 output side, 2 input side
 DATA = {TRELLIS: ("trellis", "suh", "svh"), INT4: ("q4", "s4"), MXFP8: ("fp8", "e8m0"), FP8_BLOCK: ("fp8", "scale"),
         FP8_ROW: ("fp8", "scale"), BF16: ("bf16",), FP32: ("fp32",), FP8_B32: ("fp8", "e8m0"),
-        ROWS: ("rows", "svh", "suh")}     # in checksum order
+        ROWS: ("rows", "svh", "suh"), INT8: ("q8", "s8")}     # in checksum order
 DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I64": torch.int64,
           "I32": torch.int32, "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8, "U64": torch.int64}
 ST_NAMES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32", torch.int64: "I64",
@@ -475,6 +475,8 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
     """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored, with
     a trellis matrix's data under `trellis` whatever its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
+    if fmt not in DATA:
+        raise ValueError(f"dense format {fmt} is not one of {sorted(DATA)}")
     K = K if K >= 0 else -K / 2      # a half width is written as -2K
     t = {k: v.to(device) for k, v in t.items()}
     if fmt == ROWS:         # tile t of row r: values 256t.. in stream order, rotated along the row only
@@ -501,6 +503,19 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
             q4, s4 = q4.transpose(0, 1).reshape(out, -1), s4.transpose(0, 1).reshape(out, -1)
         n = torch.stack([(q4 & 15).int() - 8, (q4 >> 4).int() - 8], -1).reshape(out, inp).float()
         return n * s4.float().repeat_interleave(32, 1)
+    if fmt == INT8:         # K holds the group size G
+        G = int(K)
+        if G not in (16, 32, 64, 128) or inp % (128 if side == IN else G):
+            raise ValueError(f"int8 group size {G} with {inp} inputs (side {side})")
+        q8, s8 = t["q8"], t["s8"]
+        if side == IN:      # stored [in/128, out, 128] and [in/128, out, 128/G]
+            q8, s8 = q8.transpose(0, 1).reshape(out, inp), s8.transpose(0, 1).reshape(out, inp // G)
+        if (q8 == -128).any():
+            raise ValueError("int8 code -128 is not a code")
+        s = s8.float()
+        if not torch.isfinite(s).all() or (s < 0).any():
+            raise ValueError("int8 scales must be finite and >= 0")
+        return q8.float() * s.repeat_interleave(G, 1)
     w = t["fp8"].view(torch.float8_e4m3fn).float() if "fp8" in t else None
     if fmt == MXFP8:
         return w * e8m0(t["e8m0"]).repeat_interleave(32, 1)
@@ -534,7 +549,7 @@ def dense_checksums(rec, t):
             parts = [t["trellis"][b], t[own][r], t[other]]
         elif fmt == ROWS:
             parts = [t["rows"][r], t["svh"][r], t["suh"]]
-        elif fmt in (INT4, FP8_B32) and side == IN:
+        elif fmt in (INT4, FP8_B32, INT8) and side == IN:
             parts = [t[k][b] for k in DATA[fmt]]
         elif fmt == FP8_B32:
             parts = [t["fp8"][r], t["e8m0"][4 * b:4 * b + 4]]
