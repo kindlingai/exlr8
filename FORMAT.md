@@ -8,7 +8,7 @@ Reference decoder: [`loader/exlr8.py`](loader/exlr8.py).
 |---|---|---|
 | v2 | trellis widths K2-K4 in the mcg codebook, native stores | `exlr8-v2` |
 | v3 | the mul1 and pmcgx codebooks, selected by tensor name | `exlr8-v2` (unchanged) |
-| v4 | widths K0.5-K6 with pair-codebook half widths, the pmul1x codebook, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths | `exlr8-v4` |
+| v4 | widths K0.5-K6 with pair-codebook half widths, the pmul1x codebook, fp16 (`-f16`) codebooks, mixed codebooks, manifest `requires`, dense codebooks, dense matrices at several widths, dense [format strings](#format-strings) in metadata `formats`, [int8 dense groups](#int8-groups) | `exlr8-v4` |
 
 A v4 release writes the v4 strings in every file and manifest. A v4 reader also reads `exlr8-v2` files, whose
 features are a subset; a v2 reader refuses v4 files by their `format`.
@@ -372,32 +372,49 @@ A manifest names a native store by its name where it would give a width K.
 
 ## Dense, vocab, extra and split files
 
-Each matrix `M` = `M.record` + `M.checksum` + data tensors. Vectors (norms, biases, gates) stored as-is under their
-stored names.
+Each matrix `M` = `M.record` + `M.checksum` + data tensors, and a format string in the file's `formats` metadata.
+Vectors (norms, biases, gates) stored as-is under their stored names.
+
+### Format strings
+
+Metadata `formats` is a JSON object from each matrix's base name (`M`, or `M.kK` for a matrix stored at several
+[widths](#dense-widths)) to its format string. A v4 writer names every matrix of a dense, vocab, extra or split file
+there. Refuse a file whose `formats` leaves out one of its matrices, names a matrix it does not hold, or gives a
+string you do not implement. A file with no `formats` (every `exlr8-v2` file, and v4 files written before it) gives
+each matrix's format by record field 0, the legacy code below; `formats` in an `exlr8-v2` file is a v4 feature.
+
+| format string | legacy code | data tensors | value |
+|---|---|---|---|
+| `trellis kK` | 1 | `trellis` U8 [entries, bytes], `suh` F16 [in], `svh` F16 [out] | side 2: entry g = input rows 128g.., down tile order; else entry g = output cols 128g.., gate/up tile order; decode as above |
+| `int4 g32` | 2 | `q4` U8, `s4` F16; side 2: [in/128, out, 64], [in/128, out, 4]; else [out, in/2], [out, in/32] | (nibble − 8) · s4, low nibble first, one scale per 32 inputs |
+| `int8 gG` | none | `q8` I8, `s8` F16; side 2: [in/128, out, 128], [in/128, out, 128/G]; else [out, in], [out, in/G] | q8 · s8, one scale per G consecutive inputs; see [int8 groups](#int8-groups) |
+| `mxfp8` | 3 | `fp8` U8 [out, in], `e8m0` U8 [out, in/32] | e4m3 · 2^(e8m0 − 127) |
+| `fp8 b128` | 4 | `fp8` U8 [out, in], `scale` F32 [⌈out/128⌉, ⌈in/128⌉] | e4m3 · scale[⌊r/128⌋, ⌊c/128⌋] |
+| `fp8 b32` | 8 | `fp8` U8, `e8m0` U8; side 2: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
+| `fp8 row` | 5 | `fp8` U8 [out, in], `scale` F32 [out] | e4m3 · scale[r] |
+| `bf16` | 6 | `bf16` [out, in] | as stored |
+| `fp32` | 7 | `fp32` [out, in] | as stored |
+| `row-trellis kK` | 9 | `rows` U8 [out, in/256 · 32K], `suh` F16 [in], `svh` F16 [out] | see [Row trellis](#row-trellis) |
+
+kK is a [width name](#symbols) (`trellis k4`, `row-trellis k4p5`). The codebook stays in the tensor name
+(`M.trellis.pmcgx`, see [Dense codebooks](#dense-codebooks)), not in the format string.
+
+### Records
 
 `M.record`, I64 [8]:
 
 | field | values |
 |---|---|
-| 0 format | 1 trellis, 2 int4 g32, 3 MXFP8, 4 FP8 128×128 block, 5 FP8 per row, 6 BF16, 7 FP32, 8 FP8 32×32 block, 9 row trellis |
+| 0 legacy format | the legacy code of a file without `formats`; with `formats`, 0 or the string's legacy code |
 | 1 out, 2 in | full matrix shape |
-| 3 K | trellis width, else 0; a half-integer K as −2K (−9 for K4.5) |
+| 3 K | trellis and row trellis: the width, a half-integer K as −2K (−9 for K4.5), equal to the format string's; else 0 |
 | 4 sharded side | 0 replicated, 1 output channels, 2 input channels |
 | 5 channels per sharding unit | 0 if replicated |
 | 6 shared input rotation (trellis) | 0 own; i ≥ 1: entry i of metadata `rotations` (absent: 1 `attn_in`, 2 `q_resid`, 3 `mlp_in`) |
 | 7 solve | 0 RTN or copied, 1 Hessian (GPTQ / LDLQ) |
 
-| format | data tensors | value |
-|---|---|---|
-| 1 trellis | `trellis` U8 [entries, bytes], `suh` F16 [in], `svh` F16 [out] | side 2: entry g = input rows 128g.., down tile order; else entry g = output cols 128g.., gate/up tile order; decode as above |
-| 2 int4 g32 | `q4` U8, `s4` F16; side 2: [in/128, out, 64], [in/128, out, 4]; else [out, in/2], [out, in/32] | (nibble − 8) · s4, low nibble first, one scale per 32 inputs |
-| 3 MXFP8 | `fp8` U8 [out, in], `e8m0` U8 [out, in/32] | e4m3 · 2^(e8m0 − 127) |
-| 4 FP8 block | `fp8` U8 [out, in], `scale` F32 [⌈out/128⌉, ⌈in/128⌉] | e4m3 · scale[⌊r/128⌋, ⌊c/128⌋] |
-| 5 FP8 row | `fp8` U8 [out, in], `scale` F32 [out] | e4m3 · scale[r] |
-| 6 BF16 | `bf16` [out, in] | as stored |
-| 7 FP32 | `fp32` [out, in] | as stored |
-| 8 FP8 32×32 block | `fp8` U8, `e8m0` U8; side 2: [in/128, out, 128], [in/128, ⌈out/32⌉, 4]; else [out, in], [⌈out/32⌉, ⌈in/32⌉] | e4m3 · 2^(e8m0[⌊r/32⌋, ⌊c/32⌋] − 127) |
-| 9 row trellis | `rows` U8 [out, in/256 · 32K], `suh` F16 [in], `svh` F16 [out] | see [Row trellis](#row-trellis) |
+Refuse a matrix whose field 0 or field 3 disagrees with its format string. A format with no legacy code, such as
+`int8 gG`, needs `formats`.
 
 | file | contents |
 |---|---|
@@ -407,10 +424,10 @@ stored names.
 | `exlr8-split-NAME.pPPP` | `M.record` (full shape) + rows [r0, r1) of M's row-major data tensors + `M.checksum` of those rows (r0 a multiple of 128); metadata `rows` = `r0-r1`, `parts`, and for a layer's matrix `layer` and NAME = `LLL.<stored name>` |
 
 Dense checksum: one U64 per 128-channel block of the sharded side (per 128 output rows if replicated), xxhash64 seed 0
-over that block's rows of each data tensor (int4 side 2: entry b of `q4` then of `s4`; FP8 block: scale row b;
-trellis: entry b ‖ its 128 sharded-side vector values ‖ the whole other-side vector; row trellis: rows 128b.. of
-`rows` ‖ `svh` of those rows ‖ the whole `suh`; FP8 32×32 block: rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`, or
-entry b of each on side 2).
+over that block's rows of each data tensor in the table's order. Exceptions: `int4 g32`, `int8 gG` and `fp8 b32` on
+side 2 hash entry b of each data tensor; `fp8 b128` hashes rows 128b.. of `fp8` ‖ scale row b; `fp8 b32` on other
+sides hashes rows 128b.. of `fp8` ‖ rows 4b..4b+3 of `e8m0`; trellis hashes entry b ‖ its 128 sharded-side vector values ‖ the whole other-side
+vector; row trellis hashes rows 128b.. of `rows` ‖ `svh` of those rows ‖ the whole `suh`.
 
 ### Row trellis
 
@@ -423,9 +440,28 @@ tile permutation, decoded through stream, states and codebook as above. With v_r
 W[r, c] = suh[c] · (Hb v_r)[c] · svh[r]
 
 where Hb applies the 128 × 128 Hadamard to each run of 128 values, as in the trellis decode. `suh` carries the
-column signs. The record gives sharded side 1 and 1 channel per sharding unit (any row split works), K in field 3,
+column signs. The record gives sharded side 1 and 1 channel per sharding unit (any row split works), K in field 3 (and
+the format string),
 and the codebook names `rows` as it names `trellis` (`rows.pmcgx`). A table whose rows hold one 256-value slice per
 layer, as Gemma 4's per-layer embeddings do, reads one tile per layer per token.
+
+### int8 groups
+
+`int8 gG` stores a matrix as signed 8-bit codes with one scale per group of G consecutive inputs in a row:
+
+W[r, c] = q8[r, c] · s8[r, ⌊c / G⌋]
+
+- G is a power of two from 16 to 128 (`int8 g16` … `int8 g128`), so a group never crosses a side-2 entry of 128
+  inputs. `in` is a multiple of G, and of 128 on side 2.
+- `q8` is in [−127, 127]. −128 is not a code: refuse a matrix that holds it.
+- `s8` is a finite fp16 ≥ 0. A group whose scale is 0 decodes to zeros whatever its codes.
+- The product is exact in fp32 (7 + 11 significant bits), so every decoder gets the same weights. An int8 kernel can
+  read `q8` as stored and apply `s8` to each group's partial sums.
+
+Record field 7 says how the codes were chosen. 0: round to nearest, s8 = fp16(max |w| over the group / 127),
+q8 = clamp(round-half-even(w / s8), −127, 127). 1: GPTQ against the matrix's input Hessian, columns in input order, each
+group's scale set by the same rule from the group's error-corrected weights when the solve reaches its first column.
+The decode is the same for both.
 
 ### Dense codebooks
 
@@ -453,20 +489,20 @@ The vocab file may carry `hf_names`, JSON from its stored names to HF names, whe
 
 | matrix | layers | format | sharded side |
 |---|---|---|---|
-| `self_attn.q_a_proj`, `self_attn.kv_a_proj_with_mqa` | 0-78 | MXFP8 | replicated |
-| `self_attn.q_b_proj` | 0, 2 | int4 g32 | output |
-| `self_attn.q_b_proj` | other | trellis K4 | output |
-| `self_attn.kv_b_proj` | 0-78 | FP8 block | output |
-| `self_attn.o_proj` | 0, 2, 3 | int4 g32 | input |
-| `self_attn.o_proj` | other | trellis K4 | input |
-| `self_attn.indexer.wq_b` | 22 indexer layers | MXFP8 | output |
-| `self_attn.indexer.wk` | 22 indexer layers | MXFP8 | replicated |
-| `self_attn.indexer.weights_proj` | 22 indexer layers | BF16 | output |
-| `mlp.gate_proj`, `mlp.up_proj` | 0-2 | trellis K4 | output |
-| `mlp.down_proj` | 0-2 | trellis K4 | input |
-| `mlp.gate` (router) | 3-78 | BF16 | replicated |
-| `eh_proj` | 78 | MXFP8 | replicated |
-| `embed_tokens`, `lm_head` | vocab | FP8 per row | replicated |
+| `self_attn.q_a_proj`, `self_attn.kv_a_proj_with_mqa` | 0-78 | `mxfp8` | replicated |
+| `self_attn.q_b_proj` | 0, 2 | `int4 g32` | output |
+| `self_attn.q_b_proj` | other | `trellis k4` | output |
+| `self_attn.kv_b_proj` | 0-78 | `fp8 b128` | output |
+| `self_attn.o_proj` | 0, 2, 3 | `int4 g32` | input |
+| `self_attn.o_proj` | other | `trellis k4` | input |
+| `self_attn.indexer.wq_b` | 22 indexer layers | `mxfp8` | output |
+| `self_attn.indexer.wk` | 22 indexer layers | `mxfp8` | replicated |
+| `self_attn.indexer.weights_proj` | 22 indexer layers | `bf16` | output |
+| `mlp.gate_proj`, `mlp.up_proj` | 0-2 | `trellis k4` | output |
+| `mlp.down_proj` | 0-2 | `trellis k4` | input |
+| `mlp.gate` (router) | 3-78 | `bf16` | replicated |
+| `eh_proj` | 78 | `mxfp8` | replicated |
+| `embed_tokens`, `lm_head` | vocab | `fp8 row` | replicated |
 
 ### DeepSeek-V4.1-Flash native release
 
@@ -482,20 +518,20 @@ Layers 40-42 are the MTP stages `mtp.0.` to `mtp.2.` (`hf_prefix`), with 128 rou
 
 | matrix | layers | format | sharded side, channels per unit |
 |---|---|---|---|
-| `attn.wq_a`, `attn.wkv` | all | FP8 32×32 block | replicated |
-| `attn.wq_b` | all | FP8 32×32 block | output, 512 (one head) |
-| `attn.wo_a` | all | FP8 32×32 block | output, 1024 (one output group) |
-| `attn.wo_b` | all | FP8 32×32 block | input, 1024 |
-| `attn.indexer.wq_b` | 2, 8, 14, 20, 24, 28, 32, 36 | FP8 32×32 block | output, 128 (one head) |
-| `attn.indexer.weights_proj` | 2, 8, 14, 20, 24, 28, 32, 36 | BF16 | output, 1 |
-| `attn.indexer.wk`, `attn.compressor.wkv`, `attn.compressor.wgate` | 2, 8, 14, 20 | BF16 | replicated |
-| `engram.wkv` | 1, 14 | FP8 32×32 block | replicated |
-| `engram.embed` | 1, 14 | MXFP8, split files `LLL.engram.embed` | output, 1 |
-| `ffn.gate` (router) | all | BF16 | replicated |
-| `main_proj` | 40 | FP8 32×32 block | replicated |
-| `markov_head.embed`, `markov_head.head` | 42 | BF16 | output, 1 |
-| `confidence_head.proj` | 42 | BF16 | replicated |
-| `embed_tokens`, `lm_head` (`embed.weight`, `head.weight`) | vocab | BF16 | output, 1 |
+| `attn.wq_a`, `attn.wkv` | all | `fp8 b32` | replicated |
+| `attn.wq_b` | all | `fp8 b32` | output, 512 (one head) |
+| `attn.wo_a` | all | `fp8 b32` | output, 1024 (one output group) |
+| `attn.wo_b` | all | `fp8 b32` | input, 1024 |
+| `attn.indexer.wq_b` | 2, 8, 14, 20, 24, 28, 32, 36 | `fp8 b32` | output, 128 (one head) |
+| `attn.indexer.weights_proj` | 2, 8, 14, 20, 24, 28, 32, 36 | `bf16` | output, 1 |
+| `attn.indexer.wk`, `attn.compressor.wkv`, `attn.compressor.wgate` | 2, 8, 14, 20 | `bf16` | replicated |
+| `engram.wkv` | 1, 14 | `fp8 b32` | replicated |
+| `engram.embed` | 1, 14 | `mxfp8`, split files `LLL.engram.embed` | output, 1 |
+| `ffn.gate` (router) | all | `bf16` | replicated |
+| `main_proj` | 40 | `fp8 b32` | replicated |
+| `markov_head.embed`, `markov_head.head` | 42 | `bf16` | output, 1 |
+| `confidence_head.proj` | 42 | `bf16` | replicated |
+| `embed_tokens`, `lm_head` (`embed.weight`, `head.weight`) | vocab | `bf16` | output, 1 |
 
 `hc_*`, `attn.attn_sink`, `engram.q_weight`, `engram.k_weight`, `ffn.gate.bias`, `ffn.gate.bias_vl` and the norms
 are vectors, stored as-is. The vision tower and aligner are `exlr8-extra-vision`, as-is.

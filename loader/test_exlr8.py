@@ -387,6 +387,120 @@ def test_dense_widths_refused(tmp_path, dense, meta):
         x.load_layer(str(tmp_path), {"layers": {}, "dense": {"0": dense}}, 0)
 
 
+def int8_matrix(base, side, G, g, out=256, inp=384):
+    """An int8 gG matrix (FORMAT.md "int8 groups") on output side 1 or input side 2, its weight computed directly
+    from the row-major codes and scales, and its checksum by the spec's wording. Its format is `int8 gG`, which a
+    file names in `formats`."""
+    q = torch.randint(-127, 128, (out, inp), dtype=torch.int8, generator=g)
+    sc = torch.rand(out, inp // G, generator=g).half()
+    sc[0, 0] = 0                                                # a zero scale decodes to zeros
+    want = q.float() * sc.float().repeat_interleave(G, 1)
+    if side == 2:       # [in/128, out, 128] and [in/128, out, 128/G]
+        q8 = q.view(out, inp // 128, 128).transpose(0, 1).contiguous()
+        s8 = sc.view(out, inp // 128, 128 // G).transpose(0, 1).contiguous()
+        sums = [x.xxh64(q8[b], s8[b]) for b in range(inp // 128)]
+    else:
+        q8, s8 = q, sc
+        sums = [x.xxh64(q8[128 * b:128 * b + 128], s8[128 * b:128 * b + 128]) for b in range(out // 128)]
+    t = {f"{base}.record": torch.tensor([0, out, inp, 0, side, 128, 0, 1]),
+         f"{base}.checksum": ("U64", torch.tensor([c - 2 ** 64 if c >= 2 ** 63 else c for c in sums])),
+         f"{base}.q8": q8, f"{base}.s8": s8}
+    return t, want
+
+
+INT8_META = {"format": "exlr8-v4", "layer": "0", "tensor_prefix": "m."}
+
+
+@pytest.mark.parametrize("side", [1, 2])
+@pytest.mark.parametrize("G", [16, 32, 64, 128])
+def test_int8_groups(tmp_path, side, G):
+    g = torch.Generator().manual_seed(G + side)
+    t, want = int8_matrix("o_proj", side, G, g)
+    os.makedirs(tmp_path / "dense")
+    meta = {**INT8_META, "formats": json.dumps({"o_proj": f"int8 g{G}"})}
+    write_st(str(tmp_path / "dense" / "exlr8-dense-000.safetensors"), t, meta)
+    got = x.load_layer(str(tmp_path), {"layers": {}}, 0, torch.float32, verify=True)
+    assert torch.equal(got["m.0.o_proj.weight"], want)
+    assert not got["m.0.o_proj.weight"][0, :G].any()
+
+
+@pytest.mark.parametrize("change", ["code", "scale", "nan", "group", "format"])
+def test_int8_groups_refused(change):
+    g = torch.Generator().manual_seed(3)
+    t, _ = int8_matrix("m", 1, 64, g)
+    rec, data = t["m.record"].clone(), {"q8": t["m.q8"].clone(), "s8": t["m.s8"].clone()}
+    rec[0], rec[3] = x.parse_format("int8 g64")          # as matrix_record gives it
+    if change == "code":
+        data["q8"][1, 1] = -128
+    elif change == "scale":
+        data["s8"][1, 1] = -1
+    elif change == "nan":
+        data["s8"][1, 1] = float("nan")
+    elif change == "group":
+        rec[3] = 48
+    else:
+        rec[0] = 11
+    with pytest.raises(ValueError):
+        x.decode_dense(rec, data)
+
+
+@pytest.mark.parametrize("text, kind", [("trellis k4", (x.TRELLIS, 4)), ("trellis k4p5", (x.TRELLIS, -9)),
+                                        ("row-trellis k2", (x.ROWS, 2)), ("int8 g16", (x.INT8, 16)),
+                                        ("int4 g32", (x.INT4, 0)), ("mxfp8", (x.MXFP8, 0)),
+                                        ("fp8 b128", (x.FP8_BLOCK, 0)), ("fp8 b32", (x.FP8_B32, 0)),
+                                        ("fp8 row", (x.FP8_ROW, 0)), ("bf16", (x.BF16, 0)), ("fp32", (x.FP32, 0))])
+def test_format_strings(text, kind):
+    assert x.parse_format(text) == kind
+
+
+@pytest.mark.parametrize("text", ["int8 g48", "int8 g256", "trellis", "MXFP8", "fp8 block", "int4 g64", ""])
+def test_format_strings_refused(text):
+    with pytest.raises(ValueError):
+        x.parse_format(text)
+
+
+def test_formats_match_legacy_codes(tmp_path):
+    """The same trellis file read by its legacy codes, and with formats and field 0 = 0, decodes the same."""
+    legacy = dense_file(str(tmp_path / "a"), DENSE_META)
+    want = x.load_layer(str(tmp_path / "a"), {"layers": {}, "dense": {"0": {"q_proj": 3}}}, 0, torch.float32,
+                        verify=True)
+    t = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in legacy.items()}
+    for k in ("q_proj.k2.record", "q_proj.k3.record", "o_proj.record"):
+        t[k][0] = 0
+    formats = {"q_proj.k2": "trellis k2", "q_proj.k3": "trellis k3", "o_proj": "trellis k4"}
+    os.makedirs(tmp_path / "b" / "dense")
+    write_st(str(tmp_path / "b" / "dense" / "exlr8-dense-000.safetensors"), t,
+             {**DENSE_META, "formats": json.dumps(formats)})
+    got = x.load_layer(str(tmp_path / "b"), {"layers": {}, "dense": {"0": {"q_proj": 3}}}, 0, torch.float32,
+                       verify=True)
+    assert got.keys() == want.keys() and all(torch.equal(got[k], want[k]) for k in got)
+
+
+@pytest.mark.parametrize("change", ["missing", "unknown", "extra", "width", "code", "v2", "no-formats"])
+def test_formats_refused(tmp_path, change):
+    g = torch.Generator().manual_seed(4)
+    t, _ = int8_matrix("o_proj", 1, 64, g)
+    formats, meta = {"o_proj": "int8 g64"}, dict(INT8_META)
+    if change == "missing":
+        formats = {}
+    elif change == "unknown":
+        formats["o_proj"] = "int8 g48"
+    elif change == "extra":
+        formats["q_proj"] = "bf16"
+    elif change == "width":
+        t["o_proj.record"][3] = 64              # field 3 is 0 for int8: G lives in the string
+    elif change == "code":
+        t["o_proj.record"][0] = x.INT4
+    elif change == "v2":
+        meta["format"] = "exlr8-v2"
+    if change != "no-formats":
+        meta["formats"] = json.dumps(formats)
+    os.makedirs(tmp_path / "dense")
+    write_st(str(tmp_path / "dense" / "exlr8-dense-000.safetensors"), t, meta)
+    with pytest.raises(ValueError):
+        x.load_layer(str(tmp_path), {"layers": {}}, 0)
+
+
 @pytest.mark.parametrize("K", [4, 4.5])
 def test_row_trellis(tmp_path, K):
     """Each row's tiles decode in stream order and rotate along the row alone (FORMAT.md "Row trellis")."""

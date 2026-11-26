@@ -14,9 +14,10 @@ matches exllamav3 0.0.43's decode value for value.
 ## What it reads
 
 exlr8 v2 and v4 files ([FORMAT.md](../FORMAT.md)): every codebook (mcg, mul1, pmcgx and their `-f16` forms),
-widths K0.5 to K6 including the pmcgx half widths, mixed-codebook width files, native stores, and v4 manifests,
-whose `requires` it checks before it opens an expert file. It refuses a file whose format, codebook or width it does
-not know, and a v4 feature in a file marked `exlr8-v2`.
+widths K0.5 to K6 including the pmcgx half widths, mixed-codebook width files, native stores, dense matrices by
+their format strings (`int8 g64`, `trellis k4`, ...) or an older file's legacy codes, and v4 manifests, whose
+`requires` it checks before it opens an expert file. It refuses a file whose format, codebook, width or dense format
+string it does not know, and a v4 feature in a file marked `exlr8-v2`.
 
 ## Tests
 

@@ -45,11 +45,14 @@ CODEBOOKS.update({f"{k}-f16": v for k, v in list(CODEBOOKS.items())})
 BYTE_SUM = ("mul1", "pmul1x")
 FORMATS = ("exlr8-v2", "exlr8-v4")
 MIXING = ("none", "width", "expert")
-TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS = 1, 2, 3, 4, 5, 6, 7, 8, 9  # record field 0
+TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS = 1, 2, 3, 4, 5, 6, 7, 8, 9  # legacy codes
+INT8 = 10                               # the loader's own kind number: int8 gG has no legacy code
+FORMAT_NAMES = {TRELLIS: "trellis", INT4: "int4 g32", INT8: "int8", MXFP8: "mxfp8", FP8_BLOCK: "fp8 b128",
+                FP8_B32: "fp8 b32", FP8_ROW: "fp8 row", BF16: "bf16", FP32: "fp32", ROWS: "row-trellis"}
 IN = 2                                  # record field 4: 0 replicated, 1 output side, 2 input side
 DATA = {TRELLIS: ("trellis", "suh", "svh"), INT4: ("q4", "s4"), MXFP8: ("fp8", "e8m0"), FP8_BLOCK: ("fp8", "scale"),
         FP8_ROW: ("fp8", "scale"), BF16: ("bf16",), FP32: ("fp32",), FP8_B32: ("fp8", "e8m0"),
-        ROWS: ("rows", "svh", "suh")}     # in checksum order
+        ROWS: ("rows", "svh", "suh"), INT8: ("q8", "s8")}     # in checksum order
 DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I64": torch.int64,
           "I32": torch.int32, "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8, "U64": torch.int64}
 ST_NAMES = {torch.bfloat16: "BF16", torch.float16: "F16", torch.float32: "F32", torch.int64: "I64",
@@ -471,10 +474,61 @@ class ExpertLayer:
 
 # ---------------------------------------------------------------- dense and vocabulary
 
+def parse_format(text):
+    """A dense format string (FORMAT.md "Format strings") as (kind, field 3): K encoded as in the record for trellis
+    and row trellis (a half width as -2K), G for int8 gG, else 0."""
+    m = re.fullmatch(r"(trellis|row-trellis) k(\d+)(p5)?", text)
+    if m:
+        K = int(m.group(2))
+        return (TRELLIS if m.group(1) == "trellis" else ROWS), (-(2 * K + 1) if m.group(3) else K)
+    m = re.fullmatch(r"int8 g(16|32|64|128)", text)
+    if m:
+        return INT8, int(m.group(1))
+    kinds = {v: k for k, v in FORMAT_NAMES.items() if k not in (TRELLIS, ROWS, INT8)}
+    if text not in kinds:
+        raise ValueError(f"dense format string {text!r} is not one this loader implements")
+    return kinds[text], 0
+
+
+def matrix_record(f, base, formats):
+    """base's record with field 0 = its kind and field 3 = K or G, from the file's `formats` (FORMAT.md "Records")
+    or, in a file without it, from the legacy code in field 0."""
+    rec = f.get(base + ".record").clone()
+    if formats is None:
+        if int(rec[0]) not in (TRELLIS, INT4, MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, FP8_B32, ROWS):
+            raise ValueError(f"{f.path}: {base} has legacy format {int(rec[0])} and the file has no formats")
+        return rec
+    if base not in formats:
+        raise ValueError(f"{f.path}: formats does not name {base}")
+    kind, field3 = parse_format(formats[base])
+    if int(rec[0]) not in (0, kind if kind != INT8 else 0):
+        raise ValueError(f"{f.path}: {base} record field 0 is {int(rec[0])}, formats says {formats[base]!r}")
+    if kind in (TRELLIS, ROWS) and int(rec[3]) != field3 or kind not in (TRELLIS, ROWS) and int(rec[3]) != 0:
+        raise ValueError(f"{f.path}: {base} record field 3 is {int(rec[3])}, formats says {formats[base]!r}")
+    rec[0], rec[3] = kind, field3
+    return rec
+
+
+def file_formats(f):
+    """The file's `formats` metadata as a dict, or None. Refused in an exlr8-v2 file."""
+    text = f.meta.get("formats")
+    if text is None:
+        return None
+    if f.meta.get("format") == "exlr8-v2":
+        raise ValueError(f"{f.path}: formats metadata (a v4 feature) in an exlr8-v2 file")
+    formats = json.loads(text)
+    if not isinstance(formats, dict) or not all(isinstance(v, str) for v in formats.values()):
+        raise ValueError(f"{f.path}: formats is not a JSON object of strings")
+    return formats
+
+
 def decode_dense(rec, t, device="cpu", cb="mcg"):
-    """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record, t: {suffix: tensor} as stored, with
-    a trellis matrix's data under `trellis` whatever its codebook cb."""
+    """One dense matrix as an HF weight (out, in) fp32. rec: the 8-field record as matrix_record gives it (field 0
+    the kind, field 3 K or G), t: {suffix: tensor} as stored, with a trellis matrix's data under `trellis` whatever
+    its codebook cb."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
+    if fmt not in DATA:
+        raise ValueError(f"dense format {fmt} is not one of {sorted(DATA)}")
     K = K if K >= 0 else -K / 2      # a half width is written as -2K
     t = {k: v.to(device) for k, v in t.items()}
     if fmt == ROWS:         # tile t of row r: values 256t.. in stream order, rotated along the row only
@@ -501,6 +555,19 @@ def decode_dense(rec, t, device="cpu", cb="mcg"):
             q4, s4 = q4.transpose(0, 1).reshape(out, -1), s4.transpose(0, 1).reshape(out, -1)
         n = torch.stack([(q4 & 15).int() - 8, (q4 >> 4).int() - 8], -1).reshape(out, inp).float()
         return n * s4.float().repeat_interleave(32, 1)
+    if fmt == INT8:         # K holds the group size G
+        G = int(K)
+        if G not in (16, 32, 64, 128) or inp % (128 if side == IN else G):
+            raise ValueError(f"int8 group size {G} with {inp} inputs (side {side})")
+        q8, s8 = t["q8"], t["s8"]
+        if side == IN:      # stored [in/128, out, 128] and [in/128, out, 128/G]
+            q8, s8 = q8.transpose(0, 1).reshape(out, inp), s8.transpose(0, 1).reshape(out, inp // G)
+        if (q8 == -128).any():
+            raise ValueError("int8 code -128 is not a code")
+        s = s8.float()
+        if not torch.isfinite(s).all() or (s < 0).any():
+            raise ValueError("int8 scales must be finite and >= 0")
+        return q8.float() * s.repeat_interleave(G, 1)
     w = t["fp8"].view(torch.float8_e4m3fn).float() if "fp8" in t else None
     if fmt == MXFP8:
         return w * e8m0(t["e8m0"]).repeat_interleave(32, 1)
@@ -534,7 +601,7 @@ def dense_checksums(rec, t):
             parts = [t["trellis"][b], t[own][r], t[other]]
         elif fmt == ROWS:
             parts = [t["rows"][r], t["svh"][r], t["suh"]]
-        elif fmt in (INT4, FP8_B32) and side == IN:
+        elif fmt in (INT4, FP8_B32, INT8) and side == IN:
             parts = [t[k][b] for k in DATA[fmt]]
         elif fmt == FP8_B32:
             parts = [t["fp8"][r], t["e8m0"][4 * b:4 * b + 4]]
@@ -552,6 +619,7 @@ def dense_matrices(f, widths=None):
     or `M.kK` for a matrix stored at several widths (FORMAT.md "Dense widths"), K picked by widths, {stored name: K}
     from the manifest's `dense` object."""
     names = set(f.names())
+    formats = file_formats(f)
     stored = {}
     for n in names:
         if not n.endswith(".record"):
@@ -562,6 +630,10 @@ def dense_matrices(f, widths=None):
             stored.setdefault(m, {})[w] = base
         else:
             stored[base] = {None: base}
+    if formats is not None:
+        bases = {b for ws in stored.values() for b in ws.values()}
+        if set(formats) - bases:
+            raise ValueError(f"{f.path}: formats names {sorted(set(formats) - bases)}, which the file does not hold")
     widths = widths or {}
     extra = set(widths) - {m for m, ws in stored.items() if None not in ws}
     if extra:
@@ -571,7 +643,7 @@ def dense_matrices(f, widths=None):
 
     def tensors(base):
         """base's codebook and {data suffix: tensor name}, checked against the `codebooks` metadata."""
-        fmt = int(f.get(base + ".record")[0])
+        fmt = int(matrix_record(f, base, formats)[0])
         codes = "rows" if fmt == ROWS else "trellis"
         found = [n[len(f"{base}.{codes}."):] for n in names if n.startswith(f"{base}.{codes}.")]
         cb = found[0] if found else "mcg"
@@ -602,9 +674,10 @@ def load_matrices(f, prefix, dtype, device, verify, raw=False, widths=None):
     the manifest's `dense` entry for this file. With raw, FP8 32x32 block matrices come back as the source's
     (weight, scale), MXFP8 as (weight, scale) too, and BF16 as stored."""
     mats, owned = dense_matrices(f, widths)
+    formats = file_formats(f)
     out = {}
     for m, (base, cb, data) in mats.items():
-        rec = f.get(base + ".record")
+        rec = matrix_record(f, base, formats)
         fmt, side = int(rec[0]), int(rec[4])
         t = {s: f.get(n) for s, n in data.items()}
         if verify:
