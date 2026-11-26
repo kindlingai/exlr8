@@ -664,3 +664,65 @@ def test_load_dense_model_errors(tmp_path):
              {"format": "exlr8-v2", "contents": "dense", "model_profile": "qwen3_vl", "group": "bogus", "layer": "0"})
     with pytest.raises(ValueError, match="unknown group"):
         x.load_dense_model(str(tmp_path))
+
+
+def test_load_dense_model_precedence_and_split_layout(tmp_path):
+    """root/dense/ takes precedence over root/, and split layouts (dense/ shards + root vocab) are discovered."""
+    g = torch.Generator().manual_seed(77)
+    base_meta = {"format": "exlr8-v2", "model_profile": "qwen3_vl"}
+
+    # 1. Both root/ and root/dense/ populated -> root/dense/ wins
+    both = tmp_path / "both"
+    os.makedirs(both / "dense")
+    write_st(str(both / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("from_root", 64, 64, g),
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    write_st(str(both / "dense" / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("from_dense", 64, 64, g),
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    got_both = x.load_dense_model(str(both), dtype=torch.float32, verify=True)
+    assert "model.language_model.layers.0.from_dense.weight" in got_both
+    assert "model.language_model.layers.0.from_root.weight" not in got_both
+
+    # 2. Split layout: dense shards in root/dense/, vocab in root/
+    split = tmp_path / "split"
+    os.makedirs(split / "dense")
+    write_st(str(split / "dense" / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("self_attn.q_proj", 64, 64, g),
+             {**base_meta, "contents": "dense", "group": "text", "layer": "0"})
+    write_st(str(split / "exlr8-vocab.safetensors"),
+             _dense_fp8_row("embed_tokens", 64, 64, g),
+             {**base_meta, "contents": "vocab"})
+    got_split = x.load_dense_model(str(split), dtype=torch.float32, verify=True)
+    assert sorted(got_split) == [
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.layers.0.self_attn.q_proj.weight",
+    ]
+
+    # 3. Mixed model_profile fails closed
+    mixed = tmp_path / "mixed"
+    os.makedirs(mixed)
+    write_st(str(mixed / "exlr8-dense-text-000.safetensors"),
+             _dense_bf16("p", 64, 64, g),
+             {"format": "exlr8-v2", "contents": "dense", "model_profile": "qwen3_vl", "group": "text", "layer": "0"})
+    write_st(str(mixed / "exlr8-dense-vision-000.safetensors"),
+             _dense_bf16("p", 64, 64, g),
+             {"format": "exlr8-v2", "contents": "dense", "model_profile": "embedding_gemma2",
+              "group": "vision", "layer": "0"})
+    with pytest.raises(ValueError, match="conflicts"):
+        x.load_dense_model(str(mixed))
+
+
+@pytest.mark.parametrize("fmt,data", [
+    (x.MXFP8, {"fp8": torch.zeros(64, 256, dtype=torch.uint8), "e8m0": torch.zeros(64, 8, dtype=torch.uint8)}),
+    (x.FP8_BLOCK, {"fp8": torch.zeros(64, 256, dtype=torch.uint8), "scale": torch.ones(1, 2)}),
+    (x.FP8_ROW, {"fp8": torch.zeros(64, 256, dtype=torch.uint8), "scale": torch.ones(64)}),
+    (x.BF16, {"bf16": torch.zeros(64, 256, dtype=torch.bfloat16)}),
+    (x.FP32, {"fp32": torch.zeros(64, 256, dtype=torch.float32)}),
+    (x.ROWS, {"rows": torch.zeros(64, 128, dtype=torch.uint8), "svh": torch.ones(64, dtype=torch.float16),
+              "suh": torch.ones(256, dtype=torch.float16)}),
+])
+def test_dense_checksums_rejects_side_in_for_row_major_formats(fmt, data):
+    rec = torch.tensor([fmt, 64, 256, 4 if fmt == x.ROWS else 0, x.IN, 128, 0, 0], dtype=torch.int64)
+    with pytest.raises(ValueError, match="row-major"):
+        x.dense_checksums(rec, data)

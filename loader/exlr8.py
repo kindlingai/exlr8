@@ -555,6 +555,8 @@ def fp8_b32_rows(t, side):
 def dense_checksums(rec, t):
     """M.checksum recomputed from the stored tensors: one xxhash64 per 128-channel block on the sharded side."""
     fmt, out, inp, K, side = (int(x) for x in rec[:5])
+    if side == IN and fmt in (MXFP8, FP8_BLOCK, FP8_ROW, BF16, FP32, ROWS):
+        raise ValueError(f"format {fmt} is row-major and requires side=OUT or side=REPLICATED, not side=IN")
     sums = []
     for b in range(-(-(inp if side == IN else out) // 128)):
         r = slice(128 * b, 128 * b + 128)
@@ -763,6 +765,8 @@ def _dense_prefix(f):
         raise ValueError(f"{f.path}: unknown group {group!r} for profile {prof_name!r}")
     if "layer" not in f.meta:
         raise ValueError(f"{f.path}: missing layer metadata")
+    if prof_name == "glm" and group == "layers" and "tensor_prefix" in f.meta:
+        return f"{f.meta['tensor_prefix']}{int(f.meta['layer'])}."
     return groups[group].format(L=int(f.meta["layer"]))
 
 
@@ -780,9 +784,10 @@ def load_vocab(root, dtype=torch.bfloat16, device="cpu", verify=False, raw=False
 
 def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
     """Decode a multi-group dense release directory (exlr8-dense-<group>-LLL.safetensors and exlr8-vocab.safetensors,
-    at root or root/dense) into {hf_tensor_name: tensor} on CPU. Maps stored names to HF names using model_profile,
-    group and layer metadata (preserved by strip_meta.py), supporting embedding_gemma2, qwen3_vl and single-group glm
-    dense releases. device is the compute device used during decoding."""
+    checked under root/dense/ first then root/, including split dense/ + root vocab layouts) into
+    {hf_tensor_name: tensor} on CPU. Maps stored names to HF names using model_profile, group and layer metadata
+    (preserved by strip_meta.py), supporting embedding_gemma2, qwen3_vl and single-group glm dense releases. device is
+    the compute device used during decoding."""
     def find_files(d):
         if not os.path.isdir(d):
             return []
@@ -791,16 +796,31 @@ def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
             if n.endswith(".safetensors") and (n.startswith("exlr8-dense-") or n == "exlr8-vocab.safetensors")
         )
 
-    files = find_files(root)
+    files = find_files(os.path.join(root, "dense"))
     if not files:
-        files = find_files(os.path.join(root, "dense"))
+        files = find_files(root)
+    else:
+        has_vocab = any(os.path.basename(p) == "exlr8-vocab.safetensors" for p in files)
+        has_dense = any(os.path.basename(p).startswith("exlr8-dense-") for p in files)
+        if not has_vocab:
+            root_vocab = os.path.join(root, "exlr8-vocab.safetensors")
+            if os.path.isfile(root_vocab):
+                files.append(root_vocab)
+        if not has_dense:
+            files.extend(p for p in find_files(root) if os.path.basename(p).startswith("exlr8-dense-"))
+        files.sort()
     if not files:
         raise FileNotFoundError(f"{root}: no exlr8-dense-*.safetensors or exlr8-vocab.safetensors found")
 
-    out = {}
+    out, seen_profile = {}, None
     for path in files:
         f = SafeFile(path)
         check_format(f)
+        prof = f.meta.get("model_profile") or "glm"
+        if seen_profile is None:
+            seen_profile = prof
+        elif prof != seen_profile:
+            raise ValueError(f"{f.path}: model_profile {prof!r} conflicts with earlier {seen_profile!r}")
         contents = f.meta.get("contents")
         if contents == "vocab" or (contents is None and os.path.basename(path) == "exlr8-vocab.safetensors"):
             names = _vocab_names(f)
