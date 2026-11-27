@@ -885,3 +885,274 @@ def test_dense_checksums_rejects_side_in_for_row_major_formats(fmt, data):
     rec = torch.tensor([fmt, 64, 256, 4 if fmt == x.ROWS else 0, x.IN, 128, 0, 0], dtype=torch.int64)
     with pytest.raises(ValueError, match="row-major"):
         x.dense_checksums(rec, data)
+
+
+# ---------------------------------------------------------------- Drama 3 (fish_omni)
+
+def _dense_fp8_block(base, out, inp, g):
+    w = torch.randn(out, inp, generator=g) * 0.1
+    bo, bi = -(-out // 128), -(-inp // 128)
+    wp = torch.zeros(bo * 128, bi * 128)
+    wp[:out, :inp] = w
+    amax = wp.view(bo, 128, bi, 128).abs().amax(dim=(1, 3))
+    scale = torch.where(amax > 0, amax / 448.0, torch.ones_like(amax))
+    q = (w / scale.repeat_interleave(128, 0)[:out].repeat_interleave(128, 1)[:, :inp]).clamp(-448, 448)
+    fp8 = q.to(torch.float8_e4m3fn).view(torch.uint8)
+    sums = [x.xxh64(fp8[128 * b:128 * b + 128], scale[b]) for b in range(bo)]
+    rec = torch.tensor([x.FP8_BLOCK, out, inp, 0, 1, 128, 0, 0], dtype=torch.int64)
+    want = fp8.view(torch.float8_e4m3fn).float() * scale.repeat_interleave(128, 0)[:out].repeat_interleave(128, 1)[:, :inp]
+    return {f"{base}.record": rec, f"{base}.checksum": _u64_i64(sums), f"{base}.fp8": fp8, f"{base}.scale": scale}, want
+
+
+def _build_drama3_trellis_layer(root, L, H_dim, I_dim, n_exp, K, cb, g):
+    """Build synthetic `experts/exlr8-layer-LLL.{index,kK}.safetensors` with routed + shared expert."""
+    os.makedirs(os.path.join(root, "experts"), exist_ok=True)
+    base = os.path.join(root, "experts", f"exlr8-layer-{L:03d}")
+    w = x.width_name(K)
+    U = I_dim // 128
+    B = int(16 * K * H_dim)
+    suf = "" if cb == "mcg" else f".{cb}"
+    fmt = "exlr8-v4" if cb.endswith("-f16") or K not in (2, 3, 4) else "exlr8-v2"
+    cb_meta = f"{cb} {' '.join(x.CODEBOOKS[cb][1])}"
+
+    w_tensors = {}
+    for p in x.PROJS:
+        w_tensors[f"trellis.{p}{suf}"] = torch.randint(0, 256, (n_exp * U * B,), dtype=torch.uint8, generator=g)
+        w_tensors[f"shared.trellis.{p}{suf}"] = torch.randint(0, 256, (U * B,), dtype=torch.uint8, generator=g)
+    start, hdr = write_st(f"{base}.{w}.safetensors", w_tensors, {"format": fmt, "codebook": cb_meta, "k": str(K)})
+
+    def make_side(pre, count):
+        side = {
+            f"{pre}{w}.gate.su_block": torch.rand(count, H_dim // 128, generator=g).half() + 0.5,
+            f"{pre}{w}.up.su_block": torch.rand(count, H_dim // 128, generator=g).half() + 0.5,
+            f"{pre}{w}.down.sv_block": torch.rand(count, H_dim // 128, generator=g).half() + 0.5,
+            f"{pre}{w}.gate.svh": torch.randn(count, I_dim, generator=g).half(),
+            f"{pre}{w}.up.svh": torch.randn(count, I_dim, generator=g).half(),
+            f"{pre}{w}.down.suh": torch.randn(count, I_dim, generator=g).half(),
+        }
+        index = torch.zeros(count, 3, U, 2, dtype=torch.int64)
+        checks = torch.zeros(count, 3, U, dtype=torch.int64)
+        for j in range(count):
+            for pi, p in enumerate(x.PROJS):
+                tname = f"{pre}trellis.{p}{suf}"
+                t_off = start + hdr[tname]["data_offsets"][0]
+                for h in range(U):
+                    u_idx = j * U + h
+                    off = t_off + u_idx * B
+                    index[j, pi, h] = torch.tensor([off, B])
+                    raw = w_tensors[tname][u_idx * B:(u_idx + 1) * B]
+                    c = slice(128 * h, 128 * h + 128)
+                    chan = side[f"{pre}{w}.down.suh"][j, c] if p == "down" else side[f"{pre}{w}.{p}.svh"][j, c]
+                    blk = side[f"{pre}{w}.down.sv_block" if p == "down" else f"{pre}{w}.{p}.su_block"][j]
+                    cs = x.xxh64(raw, chan, blk)
+                    checks[j, pi, h] = cs - 2 ** 64 if cs >= 2 ** 63 else cs
+        return {**side, f"{pre}{w}.index": index, f"{pre}{w}.checksum": ("U64", checks)}
+
+    signs = {
+        "signs.in": (torch.randint(0, 2, (H_dim,), generator=g) * 2 - 1).to(torch.int8),
+        "signs.out": (torch.randint(0, 2, (H_dim,), generator=g) * 2 - 1).to(torch.int8),
+    }
+    idx_tensors = {**signs, **make_side("", n_exp), **make_side("shared.", 1)}
+    write_st(
+        f"{base}.index.safetensors",
+        idx_tensors,
+        {
+            "format": fmt,
+            "widths": str(K),
+            "shared_widths": str(K),
+            "hidden_size": str(H_dim),
+            "moe_intermediate_size": str(I_dim),
+            "n_routed_experts": str(n_exp),
+        },
+    )
+
+
+def _write_synthetic_drama3_dense(rel, g):
+    """Write a synthetic two-layer Drama 3 dense release: gdn:0, attn:1, mtp_shared:0, mtp:0, global:0, vocab."""
+    base_meta = {"format": "exlr8-v2", "scheme": "exlr8-e4m3-v2", "model_profile": "fish_omni",
+                 "encoder_commit": "abc", "hessian": "drama3-calib-v1"}
+    os.makedirs(rel, exist_ok=True)
+    write_st(str(rel / "exlr8-dense-gdn-000.safetensors"), {
+        **_dense_trellis_side("linear_attn.in_proj_qkv", 256, 128, 4, 1, g),
+        **_dense_trellis_side("linear_attn.out_proj", 128, 128, 4, x.IN, g),
+        **_dense_bf16("linear_attn.in_proj_a", 32, 128, g),
+        **_dense_bf16("mlp.gate", 2, 128, g),
+        **_dense_bf16("mlp.shared_expert_gate", 1, 128, g),
+        "input_layernorm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+        "linear_attn.conv1d.weight": ("BF16", torch.randn(256, 1, 4, generator=g).to(torch.bfloat16)),
+    }, {**base_meta, "contents": "dense", "group": "gdn", "layer": "0"})
+    write_st(str(rel / "exlr8-dense-attn-001.safetensors"), {
+        **_dense_trellis_side("self_attn.q_proj", 256, 128, 4, 1, g),
+        **_dense_int4("self_attn.o_proj", 128, 128, x.IN, g),
+        **_dense_bf16("mlp.gate", 2, 128, g),
+        **_dense_bf16("mlp.shared_expert_gate", 1, 128, g),
+        "self_attn.q_norm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }, {**base_meta, "contents": "dense", "group": "attn", "layer": "1"})
+    write_st(str(rel / "exlr8-dense-mtp_shared-000.safetensors"), {
+        **_dense_trellis_side("eh_proj", 128, 256, 4, x.IN, g),
+        **_dense_bf16("semantic_embedding", 128, 128, g),
+        "enorm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }, {**base_meta, "contents": "dense", "group": "mtp_shared", "layer": "0"})
+    write_st(str(rel / "exlr8-dense-mtp-000.safetensors"), {
+        **_dense_trellis_side("eh_proj", 128, 256, 4, x.IN, g),
+        **_dense_bf16("codebook_embedding", 128, 128, g),
+        "hnorm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }, {**base_meta, "contents": "dense", "group": "mtp", "layer": "0"})
+    write_st(str(rel / "exlr8-dense-global-000.safetensors"), {
+        **_dense_bf16("audio_decoder.codebook_embeddings", 256, 128, g),
+        **_dense_fp8_row("audio_decoder_mtp.heads.0", 128, 128, g),
+    }, {**base_meta, "contents": "dense", "group": "global", "layer": "0"})
+    write_st(str(rel / "exlr8-vocab.safetensors"), {
+        **_dense_fp8_row("embed_tokens", 200, 128, g),
+        **_dense_fp8_row("lm_head", 200, 128, g),
+        "norm.weight": ("BF16", torch.ones(128, dtype=torch.bfloat16)),
+    }, {**base_meta, "contents": "vocab"})
+
+
+def _write_synthetic_drama3_ref_experts(rel, L, n_exp, g):
+    base_meta = {"format": "exlr8-v2", "scheme": "exlr8-ref-bf16", "model_profile": "fish_omni",
+                 "contents": "dense", "group": "experts", "layer": str(L)}
+    t = {}
+    want = {"gate": [], "up": [], "down": []}
+    for e in range(n_exp):
+        for p in x.PROJS:
+            blk, w = _dense_fp8_block(f"mlp.experts.{e}.{p}_proj", 128, 128, g)
+            t.update(blk)
+            want[p].append(w)
+    for p in x.PROJS:
+        t.update(_dense_bf16(f"mlp.shared_expert.{p}_proj", 128, 128, g))
+    write_st(str(rel / f"exlr8-dense-experts-{L:03d}.safetensors"), t, base_meta)
+    return want
+
+
+def test_load_dense_model_fish_omni(tmp_path):
+    g = torch.Generator().manual_seed(51)
+    rel = tmp_path / "dense_rel"
+    _write_synthetic_drama3_dense(rel, g)
+
+    loaded = x.load_dense_model(str(rel), dtype=torch.float32, verify=True)
+    assert sorted(loaded) == [
+        "audio_decoder.codebook_embeddings.weight",
+        "audio_decoder_mtp.heads.0.weight",
+        "audio_decoder_mtp.layers.0.codebook_embedding.weight",
+        "audio_decoder_mtp.layers.0.eh_proj.weight",
+        "audio_decoder_mtp.layers.0.hnorm.weight",
+        "audio_decoder_mtp_shared.layers.0.eh_proj.weight",
+        "audio_decoder_mtp_shared.layers.0.enorm.weight",
+        "audio_decoder_mtp_shared.layers.0.semantic_embedding.weight",
+        "lm_head.weight",
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.layers.0.input_layernorm.weight",
+        "model.language_model.layers.0.linear_attn.conv1d.weight",
+        "model.language_model.layers.0.linear_attn.in_proj_a.weight",
+        "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+        "model.language_model.layers.0.linear_attn.out_proj.weight",
+        "model.language_model.layers.0.mlp.gate.weight",
+        "model.language_model.layers.0.mlp.shared_expert_gate.weight",
+        "model.language_model.layers.1.mlp.gate.weight",
+        "model.language_model.layers.1.mlp.shared_expert_gate.weight",
+        "model.language_model.layers.1.self_attn.o_proj.weight",
+        "model.language_model.layers.1.self_attn.q_norm.weight",
+        "model.language_model.layers.1.self_attn.q_proj.weight",
+        "model.language_model.norm.weight",
+    ]
+    assert loaded["model.language_model.layers.0.linear_attn.conv1d.weight"].shape == (256, 1, 4)
+
+    stripped = tmp_path / "stripped"
+    _strip_dir(str(rel), str(stripped))
+    loaded_s = x.load_dense_model(str(stripped), dtype=torch.float32, verify=True)
+    assert list(loaded_s) == list(loaded)
+    for k in loaded:
+        assert torch.equal(loaded[k], loaded_s[k]), k
+
+
+def test_load_drama3_two_layer_release(tmp_path):
+    """Synthetic two-layer Drama 3 release across dev-ref (FP8_BLOCK dense experts), full trellis experts/,
+    and hybrid (layer 0 trellis overriding dense experts + layer 1 FP8_BLOCK dense experts)."""
+    g = torch.Generator().manual_seed(52)
+    n_exp = 2
+
+    # 1. dev-ref mode: both layers from exlr8-dense-experts-LLL.safetensors
+    ref_dir = tmp_path / "dev_ref"
+    _write_synthetic_drama3_dense(ref_dir, g)
+    want0 = _write_synthetic_drama3_ref_experts(ref_dir, 0, n_exp, g)
+    want1 = _write_synthetic_drama3_ref_experts(ref_dir, 1, n_exp, g)
+
+    sd_ref = x.load_drama3(str(ref_dir), dtype=torch.float32, verify=True)
+    for L, want in ((0, want0), (1, want1)):
+        pre = f"model.language_model.layers.{L}."
+        w13_want = torch.stack([torch.cat((want["gate"][e], want["up"][e]), dim=0) for e in range(n_exp)], dim=0)
+        w2_want = torch.stack([want["down"][e] for e in range(n_exp)], dim=0)
+        assert torch.equal(sd_ref[f"{pre}mlp.experts.w13_weight"], w13_want)
+        assert torch.equal(sd_ref[f"{pre}mlp.experts.w2_weight"], w2_want)
+        for p in x.PROJS:
+            assert f"{pre}mlp.shared_expert.{p}_proj.weight" in sd_ref
+            assert f"{pre}mlp.experts.0.{p}_proj.weight" not in sd_ref
+
+    # 2. Full trellis experts/ mode (v4 pmul1x-f16) with manifest in manifests/
+    full_dir = tmp_path / "full_rel"
+    _write_synthetic_drama3_dense(full_dir, g)
+    for L in (0, 1):
+        _build_drama3_trellis_layer(str(full_dir), L, 128, 128, n_exp, 4, "pmul1x-f16", g)
+    os.makedirs(full_dir / "manifests")
+    manifest = {
+        "format": "exlr8-v4-manifest",
+        "requires": {"trellis": ["k4 pmul1x-f16"], "stores": [], "mixing": "none"},
+        "layers": {
+            str(L): {
+                "gate": [4] * n_exp, "up": [4] * n_exp, "down": [4] * n_exp,
+                "shared": {"gate": 4, "up": 4, "down": 4},
+            }
+            for L in (0, 1)
+        },
+    }
+    with open(full_dir / "manifests" / "exlr8-manifest-bit400.json", "w") as f:
+        json.dump(manifest, f)
+
+    sd_full = x.load_drama3(str(full_dir), "bit400", dtype=torch.bfloat16, verify=True)
+    for L in (0, 1):
+        pre = f"model.language_model.layers.{L}."
+        assert sd_full[f"{pre}mlp.experts.w13_weight"].shape == (n_exp, 256, 128)
+        assert sd_full[f"{pre}mlp.experts.w2_weight"].shape == (n_exp, 128, 128)
+        assert sd_full[f"{pre}mlp.experts.w13_weight"].dtype == torch.bfloat16
+        el = x.ExpertLayer(str(full_dir), L)
+        assert torch.equal(
+            sd_full[f"{pre}mlp.experts.w13_weight"][0, :128],
+            el.projection(0, "gate", 4, verify=True).to(torch.bfloat16),
+        )
+        assert torch.equal(
+            sd_full[f"{pre}mlp.experts.w13_weight"][1, 128:],
+            el.projection(1, "up", 4, verify=True).to(torch.bfloat16),
+        )
+        assert torch.equal(
+            sd_full[f"{pre}mlp.shared_expert.down_proj.weight"],
+            el.projection("shared", "down", 4, verify=True).to(torch.bfloat16),
+        )
+
+    # Missing manifest_name when experts/ has layers fails closed
+    with pytest.raises(ValueError, match="manifest_name"):
+        x.load_drama3(str(full_dir))
+
+    # 3. Hybrid mode: layer 0 has BOTH experts/ (trellis) and dense experts (experts/ wins); layer 1 uses dense experts
+    hybrid_dir = tmp_path / "hybrid_rel"
+    _write_synthetic_drama3_dense(hybrid_dir, g)
+    _write_synthetic_drama3_ref_experts(hybrid_dir, 0, n_exp, g)
+    want1_h = _write_synthetic_drama3_ref_experts(hybrid_dir, 1, n_exp, g)
+    _build_drama3_trellis_layer(str(hybrid_dir), 0, 128, 128, n_exp, 4, "pmcgx", g)
+    hybrid_manifest = {
+        "format": "exlr8-v2-manifest",
+        "layers": {
+            "0": {
+                "gate": [4] * n_exp, "up": [4] * n_exp, "down": [4] * n_exp,
+                "shared": {"gate": 4, "up": 4, "down": 4},
+            }
+        },
+    }
+    with open(hybrid_dir / "exlr8-manifest-bit400.json", "w") as f:
+        json.dump(hybrid_manifest, f)
+
+    sd_hyb = x.load_drama3(str(hybrid_dir), "bit400", dtype=torch.float32, verify=True)
+    el0 = x.ExpertLayer(str(hybrid_dir), 0)
+    assert torch.equal(sd_hyb["model.language_model.layers.0.mlp.experts.w2_weight"][0],
+                       el0.projection(0, "down", 4, verify=True))
+    assert torch.equal(sd_hyb["model.language_model.layers.1.mlp.experts.w2_weight"][1], want1_h["down"][1])
