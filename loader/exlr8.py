@@ -53,6 +53,21 @@ DENSE_PROFILES = {
             "norm.weight": "model.language_model.norm.weight",
         },
     },
+    "fish_omni": {
+        "groups": {
+            "gdn": "model.language_model.layers.{L}.",
+            "attn": "model.language_model.layers.{L}.",
+            "mtp_shared": "audio_decoder_mtp_shared.layers.{L}.",
+            "mtp": "audio_decoder_mtp.layers.{L}.",
+            "global": "",
+            "experts": "model.language_model.layers.{L}.",
+        },
+        "vocab": {
+            "embed_tokens": "model.language_model.embed_tokens",
+            "lm_head": "lm_head",
+            "norm.weight": "model.language_model.norm.weight",
+        },
+    },
 }
 PROJS = ("gate", "up", "down")
 # Native stores (FORMAT.md "Native stores"): weights per code byte, and the E8M0 scale block (out, in).
@@ -805,7 +820,12 @@ def check_requires(manifest):
 
 
 def load_manifest(root, name):
-    path = name if os.path.isfile(name) else os.path.join(root, "manifests", f"exlr8-manifest-{name}.json")
+    if os.path.isfile(name):
+        path = name
+    else:
+        fname = name if name.endswith(".json") else f"exlr8-manifest-{name}.json"
+        cand = os.path.join(root, "manifests", fname)
+        path = cand if os.path.isfile(cand) else os.path.join(root, fname)
     with open(path) as f:
         m = json.load(f)
     check_requires(m)
@@ -883,12 +903,7 @@ def load_vocab(root, dtype=torch.bfloat16, device="cpu", verify=False, raw=False
     return load_matrices(f, lambda n: names.get(n, n), dtype, device, verify, raw)
 
 
-def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
-    """Decode a multi-group dense release directory (exlr8-dense-<group>-LLL.safetensors and exlr8-vocab.safetensors,
-    checked under root/dense/ first then root/, including split dense/ + root vocab layouts) into
-    {hf_tensor_name: tensor} on CPU. Maps stored names to HF names using model_profile, group and layer metadata
-    (preserved by strip_meta.py), supporting embedding_gemma2, qwen3_vl and single-group glm dense releases. device is
-    the compute device used during decoding."""
+def _discover_dense_files(root):
     def find_files(d):
         if not os.path.isdir(d):
             return []
@@ -912,6 +927,16 @@ def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
         files.sort()
     if not files:
         raise FileNotFoundError(f"{root}: no exlr8-dense-*.safetensors or exlr8-vocab.safetensors found")
+    return files
+
+
+def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
+    """Decode a multi-group dense release directory (exlr8-dense-<group>-LLL.safetensors and exlr8-vocab.safetensors,
+    checked under root/dense/ first then root/, including split dense/ + root vocab layouts) into
+    {hf_tensor_name: tensor} on CPU. Maps stored names to HF names using model_profile, group and layer metadata
+    (preserved by strip_meta.py), supporting embedding_gemma2, qwen3_vl, fish_omni and single-group glm dense releases.
+    device is the compute device used during decoding."""
+    files = _discover_dense_files(root)
 
     out, seen_profile = {}, None
     for path in files:
@@ -935,6 +960,128 @@ def load_dense_model(root, dtype=torch.bfloat16, device="cpu", verify=False):
         if dup:
             raise ValueError(f"{f.path}: duplicate HF tensor names {sorted(dup)[:5]}")
         out.update(tensors)
+    return out
+
+
+_DRAMA3_EXPERT_RE = re.compile(
+    r"^(model\.language_model\.layers\.\d+\.)mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight$"
+)
+
+
+def _stack_drama3_experts(tensors, pre, dtype):
+    """Stack unstacked per-expert weights in `tensors` into `{pre}mlp.experts.{w13,w2}_weight`."""
+    routed = {}
+    out = {}
+    for k, v in tensors.items():
+        m = _DRAMA3_EXPERT_RE.fullmatch(k)
+        if m is not None and m.group(1) == pre:
+            routed.setdefault(int(m.group(2)), {})[m.group(3)] = v
+        else:
+            out[k] = v
+    if not routed:
+        return out
+    n_experts = len(routed)
+    if sorted(routed) != list(range(n_experts)):
+        raise ValueError(f"{pre}: non-contiguous routed expert ids {sorted(routed)[:8]}")
+    for e, parts in routed.items():
+        if set(parts) != set(PROJS):
+            raise ValueError(f"{pre}mlp.experts.{e}: expected {PROJS}, got {sorted(parts)}")
+    w13 = torch.stack([torch.cat((routed[e]["gate"], routed[e]["up"]), dim=0) for e in range(n_experts)], dim=0)
+    w2 = torch.stack([routed[e]["down"] for e in range(n_experts)], dim=0)
+    out[f"{pre}mlp.experts.w13_weight"] = w13.to(dtype).contiguous().cpu()
+    out[f"{pre}mlp.experts.w2_weight"] = w2.to(dtype).contiguous().cpu()
+    return out
+
+
+def _load_drama3_trellis_experts(root, manifest, L, dtype, device, verify):
+    """Decode one Drama 3 MoE layer from `experts/exlr8-layer-LLL.*` into stacked `w13_weight`/`w2_weight`
+    plus singular `mlp.shared_expert.{gate,up,down}_proj.weight`."""
+    pre = f"model.language_model.layers.{L}."
+    m = manifest["layers"].get(str(L))
+    if m is None:
+        raise ValueError(f"manifest has no layer {L!r} entry for experts/exlr8-layer-{L:03d}")
+    x = ExpertLayer(root, L, device)
+    inter = x.m["moe_intermediate_size"]
+    w13 = torch.empty((x.E, 2 * inter, x.H), dtype=dtype)
+    w2 = torch.empty((x.E, x.H, inter), dtype=dtype)
+    for e in range(x.E):
+        w13[e, :inter] = x.projection(e, "gate", m["gate"][e], verify).to(dtype).cpu()
+        w13[e, inter:] = x.projection(e, "up", m["up"][e], verify).to(dtype).cpu()
+        w2[e] = x.projection(e, "down", m["down"][e], verify).to(dtype).cpu()
+    out = {
+        f"{pre}mlp.experts.w13_weight": w13,
+        f"{pre}mlp.experts.w2_weight": w2,
+    }
+    if "shared" in m:
+        for p in PROJS:
+            out[f"{pre}mlp.shared_expert.{p}_proj.weight"] = (
+                x.projection("shared", p, m["shared"][p], verify).to(dtype).cpu()
+            )
+    return out
+
+
+def load_drama3(root, manifest_name=None, dtype=torch.bfloat16, device="cpu", verify=False):
+    """Load a Drama 3 (`fish_omni`) EXLR8 release or `dev-ref` bring-up release into a state dict with
+    upstream HF tensor names and per-layer stacked routed experts (`w13_weight` [E, 2*I, H] as [gate; up]
+    and `w2_weight` [E, H, I]).
+
+    For each backbone layer L, routed + shared experts are decoded from `experts/exlr8-layer-LLL.*` using
+    `manifest_name` when present, and otherwise from the `experts` dense group (`exlr8-dense-experts-LLL.safetensors`).
+    """
+    files = _discover_dense_files(root)
+
+    # Discover trellis expert layers under root/experts/
+    experts_dir = os.path.join(root, "experts")
+    trellis_layers = set()
+    if os.path.isdir(experts_dir):
+        for fn in os.listdir(experts_dir):
+            m = re.fullmatch(r"exlr8-layer-(\d+)\.index\.safetensors", fn)
+            if m is not None:
+                trellis_layers.add(int(m.group(1)))
+
+    manifest = None
+    if isinstance(manifest_name, dict):
+        check_requires(manifest_name)
+        manifest = manifest_name
+    elif manifest_name is not None:
+        manifest = load_manifest(root, manifest_name)
+    elif trellis_layers:
+        raise ValueError(f"{root}: experts/ has layers {sorted(trellis_layers)[:8]} but manifest_name is None")
+
+    out = {}
+    for path in files:
+        f = SafeFile(path)
+        check_format(f)
+        prof = f.meta.get("model_profile")
+        if prof != "fish_omni":
+            raise ValueError(f"{f.path}: load_drama3 requires model_profile='fish_omni', got {prof!r}")
+        contents = f.meta.get("contents")
+        if contents == "vocab" or (contents is None and os.path.basename(path) == "exlr8-vocab.safetensors"):
+            names = _vocab_names(f)
+            tensors = load_matrices(f, lambda n: names.get(n, n), dtype, device, verify)
+        elif contents in ("dense", None):
+            group = f.meta.get("group")
+            layer = int(f.meta["layer"]) if "layer" in f.meta else None
+            if group == "experts" and layer in trellis_layers:
+                continue
+            pre = _dense_prefix(f)
+            tensors = load_matrices(f, lambda n: pre + n, dtype, device, verify)
+            if group == "experts":
+                tensors = _stack_drama3_experts(tensors, pre, dtype)
+        else:
+            raise ValueError(f"{f.path}: unexpected contents metadata {contents!r}")
+        dup = set(out) & set(tensors)
+        if dup:
+            raise ValueError(f"{f.path}: duplicate HF tensor names {sorted(dup)[:5]}")
+        out.update(tensors)
+
+    for L in sorted(trellis_layers):
+        tensors = _load_drama3_trellis_experts(root, manifest, L, dtype, device, verify)
+        dup = set(out) & set(tensors)
+        if dup:
+            raise ValueError(f"experts/exlr8-layer-{L:03d}: duplicate HF tensor names {sorted(dup)[:5]}")
+        out.update(tensors)
+
     return out
 
 
